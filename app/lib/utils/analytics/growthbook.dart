@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
@@ -20,7 +21,7 @@ class GrowthbookUtil {
     print('GrowthbookUtil init');
     var attr = {
       'id': SharedPreferencesUtil().uid,
-      'device': Platform.isAndroid ? 'android' : 'ios',
+      'device': !kIsWeb && Platform.isAndroid ? 'android' : (!kIsWeb && Platform.isIOS ? 'ios' : 'web'),
     };
     _gb = await GBSDKBuilderApp(
       apiKey: Env.growthbookApiKey!,

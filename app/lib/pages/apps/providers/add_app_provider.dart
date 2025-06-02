@@ -1,4 +1,6 @@
-import 'dart:io';
+import 'dart:io' if (dart.library.html) 'package:omi/utils/stubs/dart_io_web.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/cupertino.dart';
@@ -6,12 +8,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:omi/backend/http/api/apps.dart';
+import 'package:omi/backend/http/api/messages.dart' as messages_api;
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
+import 'package:omi/backend/schema/message.dart' as backend;
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:omi/utils/app_file.dart';
 
 class AddAppProvider extends ChangeNotifier {
   AppProvider? appProvider;
@@ -51,10 +57,11 @@ class AddAppProvider extends ChangeNotifier {
 
   List<Category> categories = [];
 
-  File? imageFile;
+  AppFile? imageFile;
   String? imageUrl;
   String? updateAppId;
 
+  AppFile? _pickedThumbnailFile;
   List<String> thumbnailUrls = [];
   List<String> thumbnailIds = [];
   bool isUploadingThumbnail = false;
@@ -515,18 +522,21 @@ class AddAppProvider extends ChangeNotifier {
         data['proactive_notification']['scopes'] = selectedScopes.map((e) => e.id).toList();
       }
     }
-    var success = false;
-    var res = await updateAppServer(imageFile, data);
-    if (res) {
+    bool success;
+    if (kIsWeb) {
+      success = await updateAppServer(imageFile, data, updateAppId!);
+    } else {
+      success = await updateAppServer(imageFile, data, updateAppId!);
+    }
+
+    if (success) {
       await appProvider!.getApps();
       var app = await getAppDetailsServer(updateAppId!);
       appProvider!.updateLocalApp(App.fromJson(app!));
-      AppSnackbar.showSnackbarSuccess('App updated successfully 🚀');
+      AppSnackbar.showSnackbarSuccess('App updated successfully');
       clear();
-      success = true;
     } else {
       AppSnackbar.showSnackbarError('Failed to update app. Please try again later');
-      success = false;
     }
     checkValidity();
     setIsUpdating(false);
@@ -586,7 +596,25 @@ class AddAppProvider extends ChangeNotifier {
       }
     }
     String? appId;
-    var res = await submitAppServer(imageFile!, data);
+    (bool, String, String?) res;
+    if (kIsWeb) {
+      if (imageFile != null) {
+        res = await submitAppServer(imageFile!, data);
+      } else {
+        AppSnackbar.showSnackbarError('Image data is invalid for web submission.');
+        setIsSubmitting(false);
+        return null;
+      }
+    } else {
+      if (imageFile != null) {
+        res = await submitAppServer(imageFile!, data);
+      } else {
+        AppSnackbar.showSnackbarError('Image data is invalid for mobile submission.');
+        setIsSubmitting(false);
+        return null;
+      }
+    }
+
     if (res.$1) {
       AppSnackbar.showSnackbarSuccess('App submitted successfully 🚀');
       await appProvider!.getApps();
@@ -601,32 +629,42 @@ class AddAppProvider extends ChangeNotifier {
   }
 
   Future<void> pickThumbnail() async {
-    ImagePicker imagePicker = ImagePicker();
-    try {
-      var file = await imagePicker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 85,
-      );
-      if (file != null) {
-        setIsUploadingThumbnail(true);
-        var thumbnailFile = File(file.path);
-
-        // Upload thumbnail
-        var result = await uploadAppThumbnail(thumbnailFile);
-        if (result.isNotEmpty) {
-          thumbnailUrls.add(result['thumbnail_url']!);
-          thumbnailIds.add(result['thumbnail_id']!);
-        }
-        setIsUploadingThumbnail(false);
-      }
-    } on PlatformException catch (e) {
-      if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
-      }
-      setIsUploadingThumbnail(false);
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+    if (image != null) {
+      _pickedThumbnailFile = AppFile.fromXFile(image);
+      notifyListeners();
     }
-    checkValidity();
-    notifyListeners();
+  }
+
+  Future<void> uploadAndAddPickedThumbnail() async {
+    if (_pickedThumbnailFile == null) return;
+
+    setIsUploadingThumbnail(true);
+    try {
+      List<backend.MessageFile> uploadedThumbnails = await messages_api.uploadFilesServer([_pickedThumbnailFile!]);
+
+      if (uploadedThumbnails.isNotEmpty) {
+        final uploadedThumbnail = uploadedThumbnails.first;
+        thumbnailIds.add(uploadedThumbnail.id);
+        String? url = await messages_api.getPresignedUrl(uploadedThumbnail.id);
+        if (url != null) {
+          thumbnailUrls.add(url);
+        } else {
+          thumbnailUrls.add("placeholder_or_direct_url_if_available_from_MessageFile_object");
+          AppSnackbar.showSnackbarError("Could not get display URL for new thumbnail, ID: ${uploadedThumbnail.id}");
+        }
+        _pickedThumbnailFile = null;
+        checkValidity();
+      } else {
+        AppSnackbar.showSnackbarError('Failed to upload thumbnail.');
+      }
+    } catch (e) {
+      AppSnackbar.showSnackbarError('Error uploading thumbnail: $e');
+    } finally {
+      setIsUploadingThumbnail(false);
+      notifyListeners();
+    }
   }
 
   void setIsUploadingThumbnail(bool uploading) {
@@ -641,39 +679,25 @@ class AddAppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future pickImage() async {
-    ImagePicker imagePicker = ImagePicker();
-    try {
-      var file = await imagePicker.pickImage(source: ImageSource.gallery);
-      if (file != null) {
-        imageFile = File(file.path);
-      }
+  Future<void> pickImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+    if (image != null) {
+      imageFile = AppFile.fromXFile(image);
       notifyListeners();
-    } on PlatformException catch (e) {
-      if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
-      }
     }
-    checkValidity();
-    notifyListeners();
   }
 
-  Future updateImage() async {
-    ImagePicker imagePicker = ImagePicker();
-    try {
-      var file = await imagePicker.pickImage(source: ImageSource.gallery);
-      if (file != null) {
-        imageFile = File(file.path);
-        if (imageUrl != null) {
-          await CachedNetworkImage.evictFromCache(imageUrl!, cacheKey: imageUrl);
-        }
-        imageUrl = null;
+  Future<void> updateImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+    if (image != null) {
+      imageFile = AppFile.fromXFile(image);
+      if (imageUrl != null) {
+        await CachedNetworkImage.evictFromCache(imageUrl!, cacheKey: imageUrl);
       }
+      imageUrl = null;
       notifyListeners();
-    } on PlatformException catch (e) {
-      if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError('Photos permission denied. Please allow access to photos to select an image');
-      }
     }
     checkValidity();
     notifyListeners();

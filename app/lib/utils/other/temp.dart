@@ -1,4 +1,5 @@
-import 'dart:io';
+import 'dart:io' if (dart.library.html) 'package:omi/utils/stubs/dart_io_web.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +11,13 @@ String dateTimeFormat(String format, DateTime? dateTime, {String? locale}) {
 }
 
 Future routeToPage(BuildContext context, Widget page, {bool replace = false}) {
-  var route = Platform.isIOS ? CupertinoPageRoute(builder: (c) => page) : MaterialPageRoute(builder: (c) => page);
+  PageRoute route;
+  if (!kIsWeb && Platform.isIOS) {
+    route = CupertinoPageRoute(builder: (c) => page);
+  } else {
+    route = MaterialPageRoute(builder: (c) => page);
+  }
+
   if (replace) {
     if (context.mounted) {
       return Navigator.of(context).pushAndRemoveUntil(route, (route) => false);

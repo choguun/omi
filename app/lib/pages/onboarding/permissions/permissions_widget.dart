@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/widgets/dialog.dart';
@@ -26,7 +27,7 @@ class _PermissionsWidgetState extends State<PermissionsWidget> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
-            Platform.isAndroid
+            !kIsWeb && Platform.isAndroid
                 ? CheckboxListTile(
                     value: provider.hasBackgroundPermission,
                     onChanged: (s) async {
@@ -47,7 +48,7 @@ class _PermissionsWidgetState extends State<PermissionsWidget> {
                     checkboxShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   )
                 : const SizedBox.shrink(),
-            Platform.isMacOS
+            !kIsWeb && Platform.isMacOS
                 ? CheckboxListTile(
                     value: provider.hasBluetoothPermission,
                     onChanged: (s) async {
@@ -181,7 +182,7 @@ class _PermissionsWidgetState extends State<PermissionsWidget> {
                           child: MaterialButton(
                             padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
                             onPressed: () async {
-                              if (Platform.isMacOS) {
+                              if (!kIsWeb && Platform.isMacOS) {
                                 provider.setLoading(true);
 
                                 // Request Bluetooth permission if not granted
@@ -204,7 +205,7 @@ class _PermissionsWidgetState extends State<PermissionsWidget> {
                                 return;
                               }
                               provider.setLoading(true);
-                              if (Platform.isAndroid) {
+                              if (!kIsWeb && Platform.isAndroid) {
                                 if (!provider.hasBackgroundPermission) {
                                   await provider.askForBackgroundPermissions();
                                 }

@@ -23,6 +23,11 @@ class SharedPreferencesUtil {
     _preferences = await SharedPreferences.getInstance();
   }
 
+  // Method to remove a key
+  Future<bool> remove(String key) async {
+    return await _preferences?.remove(key) ?? false;
+  }
+
   set uid(String value) => saveString('uid', value);
 
   String get uid => getString('uid') ?? '';
@@ -420,10 +425,6 @@ class SharedPreferencesUtil {
 
   List<String>? getStringList(String key) {
     return _preferences?.getStringList(key);
-  }
-
-  Future<bool> remove(String key) async {
-    return await _preferences?.remove(key) ?? false;
   }
 
   Future<bool> clear() async {

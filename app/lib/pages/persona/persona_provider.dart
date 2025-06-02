@@ -1,5 +1,7 @@
-import 'dart:io';
-
+import 'dart:io' if (dart.library.html) 'package:omi/utils/stubs/dart_io_web.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/preferences.dart';
@@ -7,6 +9,8 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/providers/app_provider.dart';
+import 'package:omi/utils/app_file.dart';
 
 typedef ShowSuccessDialogCallback = void Function(String url);
 
@@ -42,7 +46,7 @@ class PersonaProvider extends ChangeNotifier {
   bool hasTwitterConnection = false;
   ShowSuccessDialogCallback? onShowSuccessDialog;
 
-  File? selectedImage;
+  AppFile? selectedImage;
   String? selectedImageUrl;
 
   Future updatePersonaName() async {
@@ -131,7 +135,7 @@ class PersonaProvider extends ChangeNotifier {
       // If no verified persona ID exists, get or create one
       var res = await getUpsertUserPersonaServer();
       if (res != null) {
-        _userPersona = App.fromJson(res);
+        _userPersona = App.fromJson(res as Map<String, dynamic>);
         // Save the persona ID for future use
         SharedPreferencesUtil().verifiedPersonaId = _userPersona?.id;
       } else {
@@ -142,7 +146,7 @@ class PersonaProvider extends ChangeNotifier {
       // If we have a verified persona ID, fetch it
       var res = await getAppDetailsServer(_verifiedPersonaId!);
       if (res != null) {
-        _userPersona = App.fromJson(res);
+        _userPersona = App.fromJson(res as Map<String, dynamic>);
       } else {
         _userPersona = null;
         AppSnackbar.showSnackbarError('Failed to fetch your persona');
@@ -192,7 +196,8 @@ class PersonaProvider extends ChangeNotifier {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
     if (image != null) {
-      selectedImage = File(image.path);
+      selectedImage = AppFile.fromXFile(image);
+      selectedImageUrl = null;
       MixpanelManager().personaCreateImagePicked();
       validateForm();
     }
@@ -203,7 +208,8 @@ class PersonaProvider extends ChangeNotifier {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
     if (image != null) {
-      selectedImage = File(image.path);
+      selectedImage = AppFile.fromXFile(image);
+      selectedImageUrl = null;
       if (_userPersona != null) {
         MixpanelManager().personaUpdateImagePicked(personaId: _userPersona!.id);
       } else {
@@ -211,7 +217,6 @@ class PersonaProvider extends ChangeNotifier {
       }
       validateForm();
 
-      // Update
       debugPrint("pickAndUpdateImage");
       await updatePersona();
     }
@@ -231,6 +236,7 @@ class PersonaProvider extends ChangeNotifier {
     nameController.clear();
     usernameController.clear();
     selectedImage = null;
+    selectedImageUrl = null;
     makePersonaPublic = false;
     isFormValid = false;
     onShowSuccessDialog = null;
@@ -291,139 +297,94 @@ class PersonaProvider extends ChangeNotifier {
   }
 
   Future<void> updatePersona() async {
-    if (!hasOmiConnection && !hasTwitterConnection) {
-      AppSnackbar.showSnackbarError('Please connect at least one knowledge data source (Omi or Twitter)');
-      return;
-    }
-
-    MixpanelManager().personaUpdateStarted(personaId: _userPersona!.id);
+    debugPrint("updatePersona");
     setIsLoading(true);
-    try {
-      Map<String, dynamic> personaData = {
-        'id': _userPersona!.id,
-        'name': nameController.text,
-        'username': usernameController.text,
-        'private': !makePersonaPublic,
-      };
+    Map<String, dynamic> personaData = {
+      'name': nameController.text,
+      'username': usernameController.text,
+      'private': !makePersonaPublic,
+      'id': _userPersona?.id,
+      'connected_accounts': {
+        'omi': hasOmiConnection,
+        'twitter': hasTwitterConnection,
+      },
+      'twitter_data': _twitterProfile,
+    };
 
-      // Fix hasOmiConnection
-      if (!hasOmiConnection && _userPersona?.uid == SharedPreferencesUtil().uid) {
-        hasOmiConnection = true;
-      }
+    // updatePersonaApp now takes AppFile?
+    bool success = await updatePersonaApp(selectedImage, personaData);
 
-      if (hasOmiConnection && !_userPersona!.connectedAccounts.contains('omi')) {
-        personaData['connected_accounts'] = [..._userPersona!.connectedAccounts, 'omi'];
-      } else if (!hasOmiConnection && _userPersona!.connectedAccounts.contains('omi')) {
-        personaData['connected_accounts'] =
-            _userPersona!.connectedAccounts.where((element) => element != 'omi').toList();
+    if (success) {
+      if (selectedImage != null && _userPersona != null) {
+        // MixpanelManager().personaImageUpdated(personaId: _userPersona!.id);
       }
-
-      if (hasTwitterConnection && !_userPersona!.connectedAccounts.contains('twitter')) {
-        personaData['connected_accounts'] = [..._userPersona!.connectedAccounts, 'twitter'];
-        personaData['twitter'] = {
-          'username': _twitterProfile['profile'],
-          'avatar': _twitterProfile['avatar'],
-        };
-      } else if (!hasTwitterConnection && _userPersona!.connectedAccounts.contains('twitter')) {
-        personaData['connected_accounts'] =
-            _userPersona!.connectedAccounts.where((element) => element != 'twitter').toList();
-      }
-
-      List<String> updatedFields = [];
-      if (personaData['name'] != _userPersona!.name) updatedFields.add('name');
-      if (personaData['username'] != _userPersona!.username) updatedFields.add('username');
-      if (personaData['private'] == _userPersona!.private) {
-        updatedFields.add('privacy');
-      }
-      if (selectedImage != null) updatedFields.add('image');
-
-      bool success = await updatePersonaApp(selectedImage, personaData);
-      if (success) {
-        AppSnackbar.showSnackbarSuccess('Persona updated successfully');
-        MixpanelManager().personaUpdated(
-            personaId: _userPersona!.id,
-            isPublic: !(personaData['private'] as bool? ?? true),
-            updatedFields: updatedFields,
-            connectedAccounts: personaData['connected_accounts'] as List<String>?,
-            hasOmiConnection: (personaData['connected_accounts'] as List<String>?)?.contains('omi'),
-            hasTwitterConnection: (personaData['connected_accounts'] as List<String>?)?.contains('twitter'));
-        await getVerifiedUserPersona();
-        notifyListeners();
-      } else {
-        AppSnackbar.showSnackbarError('Failed to update persona');
-        MixpanelManager()
-            .personaUpdateFailed(personaId: _userPersona!.id, errorMessage: 'Failed to update persona API call');
-      }
-    } catch (e) {
-      print('Error updating persona: $e');
+      // await _getUserPersona(); // Consider re-fetching or updating local _userPersona
+      // For now, if selectedImage was used, its URL isn't immediately known without re-fetch
+      // Let's assume UI updates from selectedImage directly if it's a new local file
+      AppSnackbar.showSnackbarSuccess('Persona updated successfully');
+      selectedImage = null; // Clear selected local file after successful upload
+    } else {
       AppSnackbar.showSnackbarError('Failed to update persona');
-      MixpanelManager().personaUpdateFailed(personaId: _userPersona!.id, errorMessage: e.toString());
-    } finally {
-      setIsLoading(false);
     }
+    validateForm();
+    setIsLoading(false);
   }
 
-  Future<void> createPersona() async {
-    MixpanelManager().personaCreateStarted();
-    if (!formKey.currentState!.validate() || selectedImage == null) {
-      if (selectedImage == null) {
-        AppSnackbar.showSnackbarError('Please select an image');
-      }
+  Future<void> createPersonaAndRedirect() async {
+    if (!isFormValid) {
+      AppSnackbar.showSnackbarError('Please fill all required fields and connect at least one data source.');
       return;
     }
-
-    if (!hasOmiConnection && !hasTwitterConnection) {
-      AppSnackbar.showSnackbarError('Please connect at least one knowledge data source (Omi or Twitter)');
-      return;
-    }
-
     setIsLoading(true);
 
-    try {
-      final personaData = {
-        'name': nameController.text,
-        'private': !makePersonaPublic,
-        'username': _username,
-        'connected_accounts': <String>[],
-      };
+    Map<String, dynamic> personaData = {
+      'name': nameController.text,
+      'username': usernameController.text,
+      'private': !makePersonaPublic,
+      'connected_accounts': {
+        'omi': hasOmiConnection,
+        'twitter': hasTwitterConnection,
+      },
+      'twitter_data': _twitterProfile,
+    };
 
-      if (hasOmiConnection) {
-        (personaData['connected_accounts'] as List<String>).add('omi');
-      }
-
-      if (_twitterProfile.isNotEmpty) {
-        (personaData['connected_accounts'] as List<String>).add('twitter');
-        personaData['twitter'] = {
-          'username': _twitterProfile['profile'],
-          'avatar': _twitterProfile['avatar'],
-        };
-      }
-
-      var res = await createPersonaApp(selectedImage!, personaData);
-
-      if (res.isNotEmpty) {
-        String personaUrl = 'personas.omi.me/u/${res['username']}';
-        debugPrint('Persona URL: $personaUrl');
-        MixpanelManager().personaCreated(
-            personaId: res['id'],
-            isPublic: !(personaData['private'] as bool? ?? true),
-            connectedAccounts: personaData['connected_accounts'] as List<String>?,
-            hasOmiConnection: (personaData['connected_accounts'] as List<String>?)?.contains('omi'),
-            hasTwitterConnection: (personaData['connected_accounts'] as List<String>?)?.contains('twitter'));
-        if (onShowSuccessDialog != null) {
-          onShowSuccessDialog!(personaUrl);
-        }
-      } else {
-        AppSnackbar.showSnackbarError('Failed to create your persona. Please try again later.');
-        MixpanelManager().personaCreateFailed(errorMessage: 'API response empty or no ID');
-      }
-    } catch (e) {
-      AppSnackbar.showSnackbarError('Failed to create persona: $e');
-      MixpanelManager().personaCreateFailed(errorMessage: e.toString());
+    if (selectedImage == null) {
+      AppSnackbar.showSnackbarError('Please select an image for your persona.');
       setIsLoading(false);
-    } finally {
-      setIsLoading(false);
+      return;
     }
+
+    // createPersonaApp now takes AppFile
+    Map response = await createPersonaApp(selectedImage!, personaData);
+
+    if (response.containsKey('id')) {
+      AppSnackbar.showSnackbarSuccess('Persona created successfully!');
+      MixpanelManager().personaCreated(
+        personaId: response['id'], 
+        isPublic: makePersonaPublic,
+      );
+      SharedPreferencesUtil().hasPersonaCreated = true;
+      SharedPreferencesUtil().verifiedPersonaId = response['id'];
+      _userPersona = App.fromJson(response as Map<String, dynamic>); // Update local user persona
+      prepareUpdatePersona(_userPersona!);     // Prepare for any immediate follow-up edits if needed
+      if (onShowSuccessDialog != null && response.containsKey('share_url')) {
+        onShowSuccessDialog!(response['share_url']);
+      }
+      selectedImage = null; // Clear selected file after successful creation
+    } else {
+      String errorMsg = 'Unknown error during persona creation';
+      if (response != null && response['detail'] != null) {
+        errorMsg = response['detail'];
+      } else if (response != null && response['message'] != null) {
+        errorMsg = response['message'];
+      }
+      AppSnackbar.showSnackbarError(errorMsg);
+      MixpanelManager().personaCreateFailed(
+        errorMessage: errorMsg
+      );
+    }
+    setIsLoading(false);
+    validateForm();
   }
 
   Future checkIsUsernameTaken(String username) async {

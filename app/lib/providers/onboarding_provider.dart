@@ -45,7 +45,21 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   static const MethodChannel _screenCaptureChannel = MethodChannel('screenCapturePlatform');
 
   Future updatePermissions() async {
-    if (Platform.isMacOS) {
+    if (kIsWeb) {
+      hasBluetoothPermission = false; // Bluetooth permission is not applicable/supported this way on web
+      try {
+        hasLocationPermission = await Permission.location.isGranted;
+      } catch (e) {
+        debugPrint('Error checking location permission on web: $e');
+        hasLocationPermission = false;
+      }
+      try {
+        hasNotificationPermission = await Permission.notification.isGranted;
+      } catch (e) {
+        debugPrint('Error checking notification permission on web: $e');
+        hasNotificationPermission = false;
+      }
+    } else if (!kIsWeb && Platform.isMacOS) {
       try {
         // Use macOS-specific permission checking
         String bluetoothStatus = await _screenCaptureChannel.invokeMethod('checkBluetoothPermission');
@@ -59,12 +73,12 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
         hasNotificationPermission = notificationStatus == 'granted' || notificationStatus == 'provisional';
       } catch (e) {
         debugPrint('Error updating permissions on macOS: $e');
-        // Fallback to standard permission checking
-        hasBluetoothPermission = await Permission.bluetooth.isGranted;
+        // Fallback to standard permission checking, avoiding Bluetooth for macOS if channel fails
+        hasBluetoothPermission = false; // Assuming if channel fails, standard check might also be problematic or not desired for BT
         hasLocationPermission = await Permission.location.isGranted;
         hasNotificationPermission = await Permission.notification.isGranted;
       }
-    } else {
+    } else { // Other native platforms (iOS, Android)
       hasBluetoothPermission = await Permission.bluetooth.isGranted;
       hasLocationPermission = await Permission.location.isGranted;
       hasNotificationPermission = await Permission.notification.isGranted;
@@ -106,9 +120,13 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future askForBluetoothPermissions() async {
+    if (kIsWeb) {
+      updateBluetoothPermission(false);
+      return;
+    }
     FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
 
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       try {
         // Use macOS-specific permission handling
         String bluetoothStatus = await _screenCaptureChannel.invokeMethod('checkBluetoothPermission');
@@ -136,12 +154,12 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
         AppSnackbar.showSnackbarError('Failed to check Bluetooth permission: $e');
         updateBluetoothPermission(false);
       }
-    } else if (Platform.isIOS) {
+    } else if (!kIsWeb && Platform.isIOS) {
       PermissionStatus bleStatus = await Permission.bluetooth.request();
       debugPrint('bleStatus: $bleStatus');
       updateBluetoothPermission(bleStatus.isGranted);
     } else {
-      if (Platform.isAndroid) {
+      if (!kIsWeb && Platform.isAndroid) {
         if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
           try {
             await FlutterBluePlus.turnOn();
@@ -163,7 +181,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future askForNotificationPermissions() async {
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       try {
         // Use macOS-specific permission handling
         String notificationStatus = await _screenCaptureChannel.invokeMethod('checkNotificationPermission');
@@ -212,7 +230,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future<(bool, PermissionStatus)> askForLocationPermissions() async {
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       try {
         // Use macOS-specific permission handling
         String locationStatus = await _screenCaptureChannel.invokeMethod('checkLocationPermission');

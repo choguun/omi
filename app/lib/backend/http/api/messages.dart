@@ -1,5 +1,6 @@
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
+import 'dart:io' if (dart.library.html) 'package:omi/utils/stubs/dart_io_web.dart' as DART_IO;
 
 import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
@@ -8,7 +9,10 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/string_utils.dart';
 import 'package:http/http.dart' as http;
-import 'package:path/path.dart';
+import 'package:path/path.dart' as p;
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:omi/utils/app_file.dart';
+import 'package:http_parser/http_parser.dart' as http_parser;
 
 Future<List<ServerMessage>> getMessagesServer({
   String? pluginId,
@@ -76,62 +80,83 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   return null;
 }
 
-Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, List<String>? filesId}) async* {
+Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, List<String>? filesId, List<AppFile>? appFiles, bool? isVoice}) async* {
   var url = '${Env.apiBaseUrl}v2/messages?plugin_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/messages';
   }
 
+  http.Client client = http.Client();
+  http.BaseRequest request;
+  
   try {
-    final request = await HttpClient().postUrl(Uri.parse(url));
-    request.headers.set('Authorization', await getAuthHeader());
-    request.headers.contentType = ContentType.json;
-    request.write(jsonEncode({'text': text, 'file_ids': filesId}));
+    if (appFiles != null && appFiles.isNotEmpty) {
+      // This is a multipart request if new files are being sent
+      var multipartRequest = http.MultipartRequest('POST', Uri.parse(url));
+      multipartRequest.headers['Authorization'] = await getAuthHeader();
+      // Add text and existing file_ids as fields
+      multipartRequest.fields['text'] = text;
+      if (filesId != null && filesId.isNotEmpty) {
+        // Server needs to handle receiving file_ids as part of multipart form data
+        // This might require backend changes if it only expects file_ids with JSON body.
+        // For now, sending as a comma-separated string or multiple fields.
+        multipartRequest.fields['file_ids'] = filesId.join(','); // Or handle as list on server
+      }
+      if (appId != null) multipartRequest.fields['plugin_id'] = appId;
+      if (isVoice != null) multipartRequest.fields['is_voice'] = isVoice.toString();
 
-    final response = await request.close();
+      for (var appFile in appFiles) {
+        final bytes = await appFile.readAsBytes();
+        multipartRequest.files.add(http.MultipartFile.fromBytes(
+          'files', // Assuming server expects new files under this key
+          bytes,
+          filename: appFile.name,
+          // contentType: MediaType.parse(appFile.mimeType ?? 'application/octet-stream'), // Optional
+        ));
+      }
+      request = multipartRequest;
+    } else {
+      // This is a JSON request if no new files, or only file_ids
+      var jsonRequest = http.Request('POST', Uri.parse(url));
+      jsonRequest.headers['Authorization'] = await getAuthHeader();
+      jsonRequest.headers['Content-Type'] = 'application/json';
+      jsonRequest.body = jsonEncode({
+        'text': text,
+        'file_ids': filesId,
+        'plugin_id': appId, // Redundant if in URL, but can be here
+        'is_voice': isVoice,
+      });
+      request = jsonRequest;
+    }
 
-    if (response.statusCode != 200) {
-      Logger.error('Failed to send message: ${response.statusCode}');
+    final streamedResponse = await client.send(request);
+
+    if (streamedResponse.statusCode != 200) {
+      Logger.error('Failed to send message: ${streamedResponse.statusCode}, Body: ${await streamedResponse.stream.bytesToString()}');
       yield ServerMessageChunk.failedMessage();
       return;
     }
 
     var buffers = <String>[];
     var messageId = "1000"; // Default new message
-    await for (var data in response.transform(utf8.decoder)) {
+    await for (var data in streamedResponse.stream.transform(utf8.decoder)) {
       var lines = data.split('\n\n');
       for (var line in lines.where((line) => line.isNotEmpty)) {
-        // Dealing w/ the package spliting by 1024 bytes in dart
-        // Waiting for the next package
-        if (line.length >= 1024) {
-          buffers.add(line);
-          continue;
-        }
-
-        // Merge package if needed
-        if (buffers.isNotEmpty) {
-          buffers.add(line);
-          line = buffers.join();
-          buffers.clear();
-        }
-
+        if (line.length >= 1024) { buffers.add(line); continue; }
+        if (buffers.isNotEmpty) { line = (buffers..add(line)).join(); buffers.clear(); }
         var messageChunk = parseMessageChunk(line, messageId);
-        if (messageChunk != null) {
-          yield messageChunk;
-        }
+        if (messageChunk != null) yield messageChunk;
       }
     }
-
-    // Flush remainings
     if (buffers.isNotEmpty) {
-      var messageChunk = parseMessageChunk(buffers.join(), messageId);
-      if (messageChunk != null) {
-        yield messageChunk;
-      }
+      var mc = parseMessageChunk(buffers.join(), messageId);
+      if (mc != null) yield mc;
     }
-  } catch (e) {
-    Logger.error('Error sending message: $e');
+  } catch (e, s) {
+    Logger.error('Error sending message stream: $e\n$s');
     yield ServerMessageChunk.failedMessage();
+  } finally {
+    client.close();
   }
 }
 
@@ -151,99 +176,147 @@ Future<ServerMessage> getInitialAppMessage(String? appId) {
   });
 }
 
-Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<File> files) async* {
-  var request = http.MultipartRequest(
-    'POST',
-    Uri.parse('${Env.apiBaseUrl}v2/voice-messages'),
-  );
-  for (var file in files) {
-    request.files.add(await http.MultipartFile.fromPath('files', file.path, filename: basename(file.path)));
-  }
-  request.headers.addAll({'Authorization': await getAuthHeader()});
+Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<AppFile> appFiles) async* {
+  // This function is now more specific to voice, implying appFiles are the primary content.
+  // If text or other parameters are needed, consider merging logic or adding params.
+  var url = '${Env.apiBaseUrl}v2/voice-messages'; 
+  http.Client client = http.Client();
+  var request = http.MultipartRequest('POST', Uri.parse(url));
+  request.headers['Authorization'] = await getAuthHeader();
 
+  if (appFiles.isEmpty) {
+    Logger.warning('sendVoiceMessageStreamServer called with no files.');
+    // yield ServerMessageChunk.failedMessage(); // Or handle as appropriate
+    return;
+  }
+
+  for (var appFile in appFiles) {
+    final bytes = await appFile.readAsBytes();
+    request.files.add(http.MultipartFile.fromBytes(
+      'files', // Server expects files under this key
+      bytes,
+      filename: appFile.name,
+      contentType: http_parser.MediaType.parse(appFile.mimeType ?? 'audio/wav'),
+    ));
+  }
+  
   try {
-    var response = await request.send();
-    if (response.statusCode != 200) {
-      Logger.error('Failed to send message: ${response.statusCode}');
+    final streamedResponse = await client.send(request);
+
+    if (streamedResponse.statusCode != 200) {
+      Logger.error('Failed to send voice message: ${streamedResponse.statusCode}, Body: ${await streamedResponse.stream.bytesToString()}');
       yield ServerMessageChunk.failedMessage();
       return;
     }
 
     var buffers = <String>[];
-    var messageId = "1000"; // Default new message
-    await for (var data in response.stream.transform(utf8.decoder)) {
+    var messageId = "1000"; 
+    await for (var data in streamedResponse.stream.transform(utf8.decoder)) {
       var lines = data.split('\n\n');
       for (var line in lines.where((line) => line.isNotEmpty)) {
-        // Dealing w/ the package spliting by 1024 bytes in dart
-        // Waiting for the next package
-        if (line.length >= 1024) {
-          buffers.add(line);
-          continue;
-        }
-
-        // Merge package if needed
-        if (buffers.isNotEmpty) {
-          buffers.add(line);
-          line = buffers.join();
-          buffers.clear();
-        }
-
+        if (line.length >= 1024) { buffers.add(line); continue; }
+        if (buffers.isNotEmpty) { line = (buffers..add(line)).join(); buffers.clear(); }
         var messageChunk = parseMessageChunk(line, messageId);
-        if (messageChunk != null) {
-          yield messageChunk;
-        }
+        if (messageChunk != null) yield messageChunk;
       }
     }
-
-    // Flush remainings
     if (buffers.isNotEmpty) {
-      var messageChunk = parseMessageChunk(buffers.join(), messageId);
-      if (messageChunk != null) {
-        yield messageChunk;
-      }
+      var mc = parseMessageChunk(buffers.join(), messageId);
+      if (mc != null) yield mc;
     }
-  } catch (e) {
-    Logger.error('Error sending message: $e');
+  } catch (e, s) {
+    Logger.error('Error sending voice message stream: $e\n$s');
     yield ServerMessageChunk.failedMessage();
+  } finally {
+    client.close();
   }
 }
 
-Future<List<MessageFile>?> uploadFilesServer(List<File> files, {String? appId}) async {
-  var url = '${Env.apiBaseUrl}v2/files?app_id=$appId';
-  if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
-    url = '${Env.apiBaseUrl}v2/files';
+Future<List<MessageFile>> uploadFilesServer(List<AppFile> appFiles, {String? appId}) async {
+  if (kIsWeb) {
+    return uploadFilesServerWeb(appFiles, appId: appId);
+  } else {
+    return uploadFilesServerMobile(appFiles, appId: appId);
   }
+}
+
+Future<List<MessageFile>> uploadFilesServerMobile(List<AppFile> appFiles, {String? appId}) async {
   var request = http.MultipartRequest(
     'POST',
-    Uri.parse(url),
+    Uri.parse('${Env.apiBaseUrl}v2/files?app_id=${appId ?? ''}'),
   );
   request.headers.addAll({'Authorization': await getAuthHeader()});
-  for (var file in files) {
-    var stream = http.ByteStream(file.openRead());
-    var length = await file.length();
-    var multipartFile = http.MultipartFile(
-      'files',
-      stream,
-      length,
-      filename: basename(file.path),
-    );
-    request.files.add(multipartFile);
+
+  for (var appFile in appFiles) {
+    if (appFile.path == null) {
+      Logger.error("File path is null for upload on mobile for file: ${appFile.name}");
+      continue; // Skip this file or throw error
+    }
+    // Use DART_IO.File for mobile specific operations if any, but MultipartFile.fromPath is fine.
+    request.files.add(await http.MultipartFile.fromPath('files', appFile.path!, filename: appFile.name));
   }
 
+  if (request.files.isEmpty && appFiles.isNotEmpty) {
+      Logger.error('No files could be prepared for mobile upload despite input.');
+      return []; // Or throw an error
+  }
+  if (request.files.isEmpty && appFiles.isEmpty) return [];
+
+  var response = await request.send();
+  if (response.statusCode == 200) {
+    var body = await response.stream.bytesToString();
+    var decodedBody = jsonDecode(body) as List<dynamic>;
+    return decodedBody.map((file) => MessageFile.fromJson(file)).toList();
+  } else {
+    Logger.error('Failed to upload files (mobile): ${response.statusCode}, Body: ${await response.stream.bytesToString()}');
+    throw Exception('Failed to upload files (mobile)');
+  }
+}
+
+Future<List<MessageFile>> uploadFilesServerWeb(List<AppFile> appFiles, {String? appId}) async {
+  var request = http.MultipartRequest(
+    'POST',
+    Uri.parse('${Env.apiBaseUrl}v2/files?app_id=${appId ?? ''}'),
+  );
+  request.headers.addAll({'Authorization': await getAuthHeader()});
+
+  for (var appFile in appFiles) {
+    final bytes = await appFile.readAsBytes();
+    request.files.add(http.MultipartFile.fromBytes('files', bytes, filename: appFile.name));
+  }
+  if (request.files.isEmpty && appFiles.isNotEmpty) {
+      Logger.error('No files could be prepared for web upload despite input.');
+      return []; // Or throw an error
+  }
+  if (request.files.isEmpty && appFiles.isEmpty) return [];
+
+  var response = await request.send();
+  if (response.statusCode == 200) {
+    var body = await response.stream.bytesToString();
+    var decodedBody = jsonDecode(body) as List<dynamic>;
+    return decodedBody.map((file) => MessageFile.fromJson(file)).toList();
+  } else {
+    Logger.error('Failed to upload files (web): ${response.statusCode}, Body: ${await response.stream.bytesToString()}');
+    throw Exception('Failed to upload files (web)');
+  }
+}
+
+Future<String?> getPresignedUrl(String fileId) async {
   try {
-    var streamedResponse = await request.send();
-    var response = await http.Response.fromStream(streamedResponse);
-    if (response.statusCode == 200) {
-      debugPrint('uploadFileServer response body: ${jsonDecode(response.body)}');
-      return MessageFile.fromJsonList(jsonDecode(response.body));
-    } else {
-      debugPrint('Failed to upload file. Status code: ${response.statusCode} ${response.body}');
-      throw Exception('Failed to upload file. Status code: ${response.statusCode}');
+    final response = await makeApiCall(
+      url: '${Env.apiBaseUrl}v2/files/$fileId/presigned-url',
+      headers: {},
+      method: 'GET',
+      body: '',
+    );
+    if (response != null && response.statusCode == 200) {
+      final decodedBody = jsonDecode(response.body);
+      return decodedBody['url'];
     }
   } catch (e) {
-    debugPrint('An error occurred uploadFileServer: $e');
-    throw Exception('An error occurred uploadFileServer: $e');
+    Logger.error('Error getting presigned URL: $e');
   }
+  return null;
 }
 
 Future reportMessageServer(String messageId) async {
@@ -259,15 +332,24 @@ Future reportMessageServer(String messageId) async {
   }
 }
 
-Future<String> transcribeVoiceMessage(File audioFile) async {
+Future<String> transcribeVoiceMessage(AppFile audioFile) async {
   try {
     var request = http.MultipartRequest(
       'POST',
       Uri.parse('${Env.apiBaseUrl}v2/voice-message/transcribe'),
     );
-
     request.headers.addAll({'Authorization': await getAuthHeader()});
-    request.files.add(await http.MultipartFile.fromPath('files', audioFile.path));
+
+    if (kIsWeb) {
+      final bytes = await audioFile.readAsBytes();
+      request.files.add(http.MultipartFile.fromBytes('files', bytes, filename: audioFile.name));
+    } else {
+      if (audioFile.path == null) {
+         Logger.error('File path is null for transcribe on mobile');
+         throw Exception('File path is null for transcribe on mobile');
+      }
+      request.files.add(await http.MultipartFile.fromPath('files', audioFile.path!));
+    }
 
     var streamedResponse = await request.send();
     var response = await http.Response.fromStream(streamedResponse);

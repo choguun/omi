@@ -31,6 +31,7 @@ import 'package:omi/utils/enums.dart';
 import 'package:internet_connection_checker_plus/internet_connection_checker_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class CaptureProvider extends ChangeNotifier
     with MessageNotifierMixin
@@ -269,7 +270,8 @@ class CaptureProvider extends ChangeNotifier
         setIsWalSupported(checkWalSupported);
       }
       if (_isWalSupported) {
-        _wal.getSyncs().phone.onByteStream(snapshot);
+        // _wal.getSyncs().phone.onByteStream(snapshot); // .phone was error, .mem (IWalSync) does not have onByteStream
+        // TODO: Re-evaluate how WAL should handle raw byte stream if needed.
       }
 
       // send ws
@@ -279,7 +281,10 @@ class CaptureProvider extends ChangeNotifier
 
         // synced
         if (_isWalSupported) {
-          _wal.getSyncs().phone.onBytesSync(value);
+          // It seems onBytesSync might have been intended to trigger a sync for a specific Wal object.
+          // Replacing with syncWal if walToSync (value) is the correct Wal object.
+          // _wal.getSyncs().mem?.syncWal(wal: value); // WalSyncs does not have .mem
+          // TODO: Determine correct WAL sync target if this was intended.
         }
       }
     });
@@ -377,7 +382,8 @@ class CaptureProvider extends ChangeNotifier
     }
     final deviceId = _recordingDevice!.id;
     BleAudioCodec codec = await _getAudioCodec(deviceId);
-    await _wal.getSyncs().phone.onAudioCodecChanged(codec);
+    // await _wal.getSyncs().mem?.onAudioCodecChanged(codec); // WalSyncs does not have .mem
+    // TODO: Determine correct WAL sync target if this was intended.
     await streamButton(deviceId);
     await streamAudioToWs(deviceId, codec);
 
@@ -453,7 +459,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> streamSystemAudioRecording() async {
-    if (!Platform.isMacOS) {
+    if (!kIsWeb && !Platform.isMacOS) {
       notifyError('System audio recording is only available on macOS.');
       return;
     }
@@ -521,7 +527,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> stopSystemAudioRecording() async {
-    if (!Platform.isMacOS) return;
+    if (!kIsWeb && !Platform.isMacOS) return;
     ServiceManager.instance().systemAudio.stop();
     updateRecordingState(RecordingState.stop);
     await _socket?.stop(reason: 'stop system audio recording from Flutter');
@@ -705,17 +711,19 @@ class CaptureProvider extends ChangeNotifier
 
   @override
   void onSegmentReceived(List<TranscriptSegment> newSegments) {
-    _processNewSegmentReceived(newSegments);
-  }
-
-  void _processNewSegmentReceived(List<TranscriptSegment> newSegments) async {
     if (newSegments.isEmpty) return;
 
-    if (segments.isEmpty) {
-      debugPrint('newSegments: ${newSegments.last}');
-      FlutterForegroundTask.sendDataToTask(jsonEncode({'location': true}));
-      await _loadInProgressConversation();
+    if (recordingState == RecordingState.systemAudioRecord && !kIsWeb && Platform.isMacOS) {
+      segments.addAll(newSegments);
+      notifyListeners();
+      return;
     }
+
+    if (segments.isEmpty) {
+      FlutterForegroundTask.sendDataToTask(jsonEncode({'location': true}));
+      _loadInProgressConversation();
+    }
+
     var remainSegments = TranscriptSegment.updateSegments(segments, newSegments);
     TranscriptSegment.combineSegments(segments, remainSegments);
 

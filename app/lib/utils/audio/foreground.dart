@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
@@ -74,7 +75,7 @@ class ForegroundUtil {
       await FlutterForegroundTask.requestNotificationPermission();
     }
 
-    if (Platform.isAndroid) {
+    if (!kIsWeb && Platform.isAndroid) {
       // if (!await FlutterForegroundTask.canDrawOverlays) {
       //   await FlutterForegroundTask.openSystemAlertWindowSettings();
       // }

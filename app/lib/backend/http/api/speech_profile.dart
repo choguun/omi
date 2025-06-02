@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/env/env.dart';
@@ -35,7 +37,7 @@ Future<String?> getUserSpeechProfile() async {
   return null;
 }
 
-Future<bool> uploadProfile(File file) async {
+Future<bool> uploadProfileMobile(File file) async {
   var request = http.MultipartRequest(
     'POST',
     Uri.parse('${Env.apiBaseUrl}v3/upload-audio'),
@@ -48,15 +50,40 @@ Future<bool> uploadProfile(File file) async {
     var response = await http.Response.fromStream(streamedResponse);
 
     if (response.statusCode == 200) {
-      debugPrint('uploadProfile Response body: ${jsonDecode(response.body)}');
+      debugPrint('uploadProfileMobile Response body: ${jsonDecode(response.body)}');
       return true;
     } else {
-      debugPrint('Failed to upload sample. Status code: ${response.statusCode}');
-      throw Exception('Failed to upload sample. Status code: ${response.statusCode}');
+      debugPrint('Failed to upload sample (mobile). Status code: ${response.statusCode}');
+      throw Exception('Failed to upload sample (mobile). Status code: ${response.statusCode}');
     }
   } catch (e) {
-    debugPrint('An error occurred uploadSample: $e');
-    throw Exception('An error occurred uploadSample: $e');
+    debugPrint('An error occurred uploadSample (mobile): $e');
+    throw Exception('An error occurred uploadSample (mobile): $e');
+  }
+}
+
+Future<bool> uploadProfileWeb(Uint8List fileBytes, String fileName) async {
+  var request = http.MultipartRequest(
+    'POST',
+    Uri.parse('${Env.apiBaseUrl}v3/upload-audio'),
+  );
+  request.files.add(http.MultipartFile.fromBytes('file', fileBytes, filename: fileName));
+  request.headers.addAll({'Authorization': await getAuthHeader()});
+
+  try {
+    var streamedResponse = await request.send();
+    var response = await http.Response.fromStream(streamedResponse);
+
+    if (response.statusCode == 200) {
+      debugPrint('uploadProfileWeb Response body: ${jsonDecode(response.body)}');
+      return true;
+    } else {
+      debugPrint('Failed to upload sample (web). Status code: ${response.statusCode}');
+      throw Exception('Failed to upload sample (web). Status code: ${response.statusCode}');
+    }
+  } catch (e) {
+    debugPrint('An error occurred uploadSample (web): $e');
+    throw Exception('An error occurred uploadSample (web): $e');
   }
 }
 

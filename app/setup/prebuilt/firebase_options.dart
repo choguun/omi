@@ -66,12 +66,12 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyC1U6S-hp8x_utpVDHtZwwBDxobhzRZI1w',
-    appId: '1:1031333818730:web:e1b83d713c04245cafb513',
-    messagingSenderId: '1031333818730',
-    projectId: 'based-hardware-dev',
-    authDomain: 'based-hardware-dev.firebaseapp.com',
-    storageBucket: 'based-hardware-dev.firebasestorage.app',
+    apiKey: "AIzaSyA42Po1b2Rerv8h1Nla5i8aO4ayigIZVFk",
+    authDomain: "based-hardware-dev.firebaseapp.com",
+    projectId: "based-hardware-dev",
+    storageBucket: "based-hardware-dev.firebasestorage.app",
+    messagingSenderId: "1031333818730",
+    appId: "1:1031333818730:web:74db1cea21bcc16fafb513"
   );
 
 }

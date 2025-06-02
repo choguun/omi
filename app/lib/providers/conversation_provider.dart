@@ -44,13 +44,16 @@ class ConversationProvider extends ChangeNotifier implements IWalServiceListener
   bool isFetchingConversations = false;
   List<SyncedConversationPointer> syncedConversationsPointers = [];
 
+  bool _canSync = false;
+  bool get canSync => _canSync;
+
   ConversationProvider() {
     _wal.subscribe(this, this);
     _preload();
   }
 
   _preload() async {
-    _missingWals = await _wal.getSyncs().getMissingWals();
+    _missingWals = await getMissingWals();
     notifyListeners();
   }
 
@@ -456,13 +459,13 @@ class ConversationProvider extends ChangeNotifier implements IWalServiceListener
 
   @override
   void onMissingWalUpdated() async {
-    _missingWals = await _wal.getSyncs().getMissingWals();
+    _missingWals = await getMissingWals();
     notifyListeners();
   }
 
   @override
   void onWalSynced(Wal wal, {ServerConversation? conversation}) async {
-    _missingWals = await _wal.getSyncs().getMissingWals();
+    _missingWals = await getMissingWals();
     notifyListeners();
   }
 
@@ -474,37 +477,85 @@ class ConversationProvider extends ChangeNotifier implements IWalServiceListener
     _walsSyncedProgress = percentage;
   }
 
-  Future syncWals() async {
-    debugPrint("provider > syncWals");
-    setSyncCompleted(false);
-    _walsSyncedProgress = 0.0;
-    setIsSyncing(true);
-    var res = await _wal.getSyncs().syncAll(progress: this);
-    if (res != null) {
-      if (res.newConversationIds.isNotEmpty || res.updatedConversationIds.isNotEmpty) {
-        await getSyncedConversationsData(res);
-      }
-    }
-    setSyncCompleted(true);
-    setIsSyncing(false);
-    notifyListeners();
-    return;
+  void updateCanSync() {
+    _canSync = _missingWals.isNotEmpty;
+    // notifyListeners(); // Often called after this, so might be redundant here
   }
 
-  Future syncWal(Wal wal) async {
-    debugPrint("provider > syncWal ${wal.id}");
-    appendMultipleSyncs(true);
-    _walsSyncedProgress = 0.0;
-    var res = await _wal.getSyncs().syncWal(wal: wal, progress: this);
-    if (res != null) {
-      if (res.newConversationIds.isNotEmpty || res.updatedConversationIds.isNotEmpty) {
-        print('Synced memories: ${res.newConversationIds} ${res.updatedConversationIds}');
-        await getSyncedConversationsData(res);
-      }
+  Future<List<Wal>> getMissingWals() async { // Ensure return type
+    List<Wal> allMissingWals = [];
+    if (_wal != null && _wal.getSyncs() != null && _wal.getSyncs().all != null) {
+        for (var syncService in _wal.getSyncs().all) {
+          allMissingWals.addAll(await syncService.getMissingWals());
+        }
     }
-    removeMultipleSyncs();
+    _missingWals = allMissingWals; // Update the internal list
+    updateCanSync();
+    return _missingWals; // Return the fetched list
+  }
+
+  Future<SyncLocalFilesResponse?> syncAllWals({Function(double)? onProgress}) async {
+    isSyncing = true;
     notifyListeners();
-    return;
+    SyncLocalFilesResponse finalResponse = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    double totalProgress = 0;
+    
+    List<IWalSync> servicesToSync = [];
+    if (_wal != null && _wal.getSyncs() != null && _wal.getSyncs().all != null) {
+        for (var s in _wal.getSyncs().all) {
+            List<Wal> serviceWals = await s.getMissingWals();
+            if (serviceWals.isNotEmpty) {
+                servicesToSync.add(s);
+            }
+        }
+    }
+
+    final double progressStep = servicesToSync.isNotEmpty ? 1.0 / servicesToSync.length : 0;
+
+    for (var syncService in servicesToSync) {
+      SyncLocalFilesResponse? serviceResponse = await syncService.syncAll(progress: this);
+      if (serviceResponse != null) {
+        finalResponse.newConversationIds.addAll(serviceResponse.newConversationIds);
+        finalResponse.updatedConversationIds.addAll(serviceResponse.updatedConversationIds);
+      }
+      totalProgress += progressStep;
+      onWalSyncedProgress(totalProgress.clamp(0.0, 1.0)); // Report aggregated progress
+    }
+
+    await getMissingWals(); // Re-fetch and update _missingWals, also calls updateCanSync
+    isSyncing = false;
+    notifyListeners();
+    return finalResponse;
+  }
+
+  Future<SyncLocalFilesResponse?> syncWal(Wal wal, {Function(double)? onProgress}) async {
+    isSyncing = true;
+    notifyListeners();
+    IWalSync? syncService;
+    if (_wal != null && _wal.getSyncs() != null) {
+        switch (wal.storage) {
+          case WalStorage.mem:
+            syncService = _wal.getSyncs().mem;
+            break;
+          case WalStorage.disk:
+            syncService = _wal.getSyncs().disk;
+            break;
+          case WalStorage.sdcard:
+            syncService = _wal.getSyncs().sdcard;
+            break;
+        }
+    }
+
+    SyncLocalFilesResponse? response;
+    if (syncService != null) {
+      response = await syncService.syncWal(wal: wal, progress: this);
+    }
+
+    _missingWals = await getMissingWals(); // Re-fetch after sync
+    updateCanSync();
+    isSyncing = false;
+    notifyListeners();
+    return response;
   }
 
   void setSyncCompleted(bool value) {

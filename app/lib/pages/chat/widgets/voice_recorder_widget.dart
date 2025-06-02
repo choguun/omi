@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as Math;
 import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:omi/backend/http/api/messages.dart';
@@ -10,6 +11,10 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/file.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shimmer/shimmer.dart';
+import 'package:path_provider/path_provider.dart' if (dart.library.html) 'package:omi/pages/home/path_provider_unsupported.dart'; // Conditional import for path_provider
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:omi/utils/app_file.dart'; // Import AppFile
+import 'dart:html' as html; // Added for debugging download
 
 enum RecordingState {
   notRecording,
@@ -20,7 +25,7 @@ enum RecordingState {
 }
 
 class VoiceRecorderWidget extends StatefulWidget {
-  final Function(String) onTranscriptReady;
+  final Function(String, AppFile?) onTranscriptReady;
   final VoidCallback onClose;
 
   const VoiceRecorderWidget({
@@ -38,6 +43,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
   List<List<int>> _audioChunks = [];
   String _transcript = '';
   bool _isProcessing = false;
+  AppFile? _recordedAudioAppFile; // To store the AppFile once created
 
   // Audio visualization
   final List<double> _audioLevels = List.generate(20, (_) => 0.1);
@@ -82,54 +88,21 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
     await Permission.microphone.request();
 
     await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
+      debugPrint('[VoiceRecorderWidget] onByteReceived, length: \${bytes.lengthInBytes}');
       if (_state == RecordingState.recording && mounted) {
-        // Check if widget is still mounted before calling setState
         if (mounted) {
           setState(() {
-            _audioChunks.add(bytes.toList());
+            _audioChunks.add(bytes.toList()); // bytes are now framed Opus packets
 
-            // Update audio visualization based on actual audio levels
-            if (bytes.isNotEmpty) {
-              // Calculate RMS (Root Mean Square) for PCM16 audio data
-              double rms = 0;
-
-              // Process bytes as 16-bit samples (2 bytes per sample)
-              for (int i = 0; i < bytes.length - 1; i += 2) {
-                // Convert two bytes to a 16-bit signed integer
-                // PCM16 is little-endian: LSB first, then MSB
-                int sample = bytes[i] | (bytes[i + 1] << 8);
-
-                // Convert to signed value (if high bit is set)
-                if (sample > 32767) {
-                  sample = sample - 65536;
+            // Temporarily disable/remove PCM-based audio visualization
+            // as 'bytes' are no longer PCM.
+            // A new visualization method would be needed for Opus packet energy.
+            // For now, let's just keep the last level to show some activity.
+            if (_audioLevels.isNotEmpty) {
+                for (int i = 0; i < _audioLevels.length - 1; i++) {
+                    _audioLevels[i] = _audioLevels[i + 1];
                 }
-
-                // Square the sample and add to sum
-                rms += sample * sample;
-              }
-
-              // Calculate RMS and normalize to 0.0-1.0 range
-              // 32768 is max absolute value for 16-bit audio
-              int sampleCount = bytes.length ~/ 2;
-              if (sampleCount > 0) {
-                rms = Math.sqrt(rms / sampleCount) / 32768.0;
-              } else {
-                rms = 0;
-              }
-
-              // Apply non-linear scaling to make quiet sounds more visible
-              // and loud sounds more dramatic
-              final level = Math.pow(rms, 0.4).toDouble().clamp(0.1, 1.0);
-
-              // Shift all values left
-              for (int i = 0; i < _audioLevels.length - 1; i++) {
-                _audioLevels[i] = _audioLevels[i + 1];
-              }
-
-              // Add new level at the end
-              _audioLevels[_audioLevels.length - 1] = level;
-
-              // We don't force setState here anymore - the timer will handle updates
+                _audioLevels[_audioLevels.length - 1] = 0.5; // Static placeholder
             }
           });
         }
@@ -139,6 +112,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
       setState(() {
         _state = RecordingState.recording;
         _audioChunks = [];
+        _recordedAudioAppFile = null; // Clear previous recording
         // Reset audio levels
         for (int i = 0; i < _audioLevels.length; i++) {
           _audioLevels[i] = 0.1;
@@ -169,29 +143,51 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
 
     await _stopRecording();
 
-    // Flatten audio chunks into a single list
-    List<int> flattenedBytes = [];
+    // Flatten audio chunks (framed Opus packets) into a single list
+    List<int> framedOpusBytesList = [];
     for (var chunk in _audioChunks) {
-      flattenedBytes.addAll(chunk);
+      framedOpusBytesList.addAll(chunk);
     }
+    final Uint8List allFramedOpusData = Uint8List.fromList(framedOpusBytesList);
 
-    // Convert PCM to WAV file
-    final audioFile = await FileUtils.convertPcmToWavFile(
-      Uint8List.fromList(flattenedBytes),
-      16000, // Sample rate
-      1, // Mono channel
+    // Determine Opus frame size (samples per frame)
+    // Web uses 32000 Hz, 20ms frames for Opus encoding in MicRecorderService
+    // Frame size = 0.020s * 32000 samples/s = 640 samples
+    // final int opusFrameSizeInSamples = 640;
+    final int actualSampleRate = ServiceManager.instance().mic.actualSampleRate ?? 16000; // Fallback if null, though it shouldn't be
+    final int opusFrameSizeInSamples = (actualSampleRate * 0.020).round();
+
+    // Use current time in seconds since epoch, as expected by the backend.
+    // ENSURE THE CLIENT SYSTEM CLOCK IS ACCURATE FOR THIS TO WORK.
+    // Subtract 30 seconds to ensure the timestamp is not slightly in the future.
+    final int currentMilliseconds = DateTime.now().millisecondsSinceEpoch;
+    final String timestamp = (currentMilliseconds ~/ 1000).toString();
+    final String fileName = "voice_recording_${timestamp}_fs${opusFrameSizeInSamples}.bin";
+    // --- END TEMPORARY HARDCODED FILENAME ---
+
+    _recordedAudioAppFile = await AppFile.fromBytes(
+      allFramedOpusData,
+      fileName,
+      mimeType: "application/octet-stream", // Correct MIME type for .bin
+      length: allFramedOpusData.lengthInBytes,
     );
 
     try {
-      final transcript = await transcribeVoiceMessage(audioFile);
+      debugPrint('[VoiceRecorderWidget] Attempting to transcribe with filename: ${_recordedAudioAppFile?.name}'); // Log the filename
+      // Call the unified transcribeVoiceMessage with the .bin AppFile
+      String transcript = await transcribeVoiceMessage(_recordedAudioAppFile!); 
+
       if (mounted) {
         setState(() {
           _transcript = transcript;
           _state = RecordingState.transcribeSuccess;
           _isProcessing = false;
         });
-        if (transcript.isNotEmpty) {
-          widget.onTranscriptReady(transcript);
+        if (transcript.isNotEmpty) { // Pass both transcript and AppFile
+            widget.onTranscriptReady(transcript, _recordedAudioAppFile);
+        } else if (transcript.isEmpty && _recordedAudioAppFile != null) {
+            // If transcript is empty but we have audio, still call with null transcript but with AppFile
+            widget.onTranscriptReady('', _recordedAudioAppFile);
         }
       }
     } catch (e) {
@@ -207,11 +203,14 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
   }
 
   void _retry() {
-    if (_audioChunks.isEmpty) {
-      _startRecording();
-    } else {
-      // Retry transcription with existing audio data
-      _processRecording();
+    // If we have an AppFile, it means WAV conversion was done. Retry transcription.
+    if (_recordedAudioAppFile != null) { 
+      _processRecording(); 
+    } else if (_audioChunks.isNotEmpty && _recordedAudioAppFile == null) {
+      // If we have chunks but no AppFile (e.g. first attempt failed before AppFile creation or WAV conversion)
+      _processRecording(); // This will create AppFile from chunks and then transcribe
+    } else { // No audio data at all, or some other unexpected state
+       _startRecording(); // Default to starting a new recording
     }
   }
 
@@ -312,7 +311,10 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                 ),
                 IconButton(
                   icon: const Icon(Icons.send, color: Colors.white),
-                  onPressed: () => widget.onTranscriptReady(_transcript),
+                  onPressed: () {
+                      // Pass transcript and the recorded AppFile
+                      widget.onTranscriptReady(_transcript, _recordedAudioAppFile);
+                  }
                 ),
               ],
             ),

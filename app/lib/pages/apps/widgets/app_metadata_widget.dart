@@ -1,4 +1,8 @@
-import 'dart:io';
+import 'package:omi/utils/stubs/dart_io_web.dart' if (dart.library.io) 'dart:io' as io_stub;
+import 'dart:io' as dart_io;
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:omi/utils/app_file.dart'; // Import AppFile
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -11,7 +15,7 @@ import 'package:provider/provider.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 
 class AppMetadataWidget extends StatelessWidget {
-  final File? imageFile;
+  final AppFile? imageFile;
   final String? imageUrl;
   final VoidCallback pickImage;
   final TextEditingController appNameController;
@@ -62,16 +66,7 @@ class AppMetadataWidget extends StatelessWidget {
                       borderRadius: BorderRadius.circular(30.0),
                       border: Border.all(color: Colors.grey.shade800, width: 2.0),
                     ),
-                    child: imageFile != null || imageUrl != null
-                        ? (imageUrl == null
-                            ? ClipRRect(
-                                borderRadius: BorderRadius.circular(30.0),
-                                child: Image.file(imageFile!, fit: BoxFit.cover))
-                            : ClipRRect(
-                                borderRadius: BorderRadius.circular(30.0),
-                                child: CachedNetworkImage(imageUrl: imageUrl!),
-                              ))
-                        : const Icon(Icons.add_a_photo, color: Colors.grey, size: 32),
+                    child: _buildImageWidget(context),
                   ),
                 ),
                 (imageFile != null || imageUrl != null)
@@ -526,5 +521,64 @@ class AppMetadataWidget extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Widget _buildImageWidget(BuildContext context) {
+    if (imageUrl != null && imageUrl!.isNotEmpty) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(30.0),
+        child: CachedNetworkImage(
+          imageUrl: imageUrl!,
+          fit: BoxFit.cover,
+          placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
+          errorWidget: (context, url, error) => const Icon(Icons.error, color: Colors.grey, size: 32),
+        ),
+      );
+    } else if (imageFile != null) {
+      if (kIsWeb) {
+        // Web: Use Image.memory with bytes from AppFile
+        return FutureBuilder<Uint8List>(
+          future: imageFile!.readAsBytes(),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(30.0),
+                child: Image.memory(snapshot.data!, fit: BoxFit.cover),
+              );
+            } else if (snapshot.hasError) {
+              return const Icon(Icons.error, color: Colors.grey, size: 32);
+            }
+            return const Center(child: CircularProgressIndicator());
+          },
+        );
+      } else {
+        // Mobile: Prefer Image.file if path is available, otherwise Image.memory
+        if (imageFile!.path != null && imageFile!.path!.isNotEmpty) {
+          // CORRECTED APPROACH: Use the explicit dart_io alias
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(30.0),
+            child: Image.file(dart_io.File(imageFile!.path!), fit: BoxFit.cover), // Use aliased dart_io.File
+          );
+        } else {
+          // Fallback to bytes if no path
+          return FutureBuilder<Uint8List>(
+            future: imageFile!.readAsBytes(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+                return ClipRRect(
+                  borderRadius: BorderRadius.circular(30.0),
+                  child: Image.memory(snapshot.data!, fit: BoxFit.cover),
+                );
+              } else if (snapshot.hasError) {
+                return const Icon(Icons.error, color: Colors.grey, size: 32);
+              }
+              return const Center(child: CircularProgressIndicator());
+            },
+          );
+        }
+      }
+    } else {
+      return const Icon(Icons.add_a_photo, color: Colors.grey, size: 32);
+    }
   }
 }

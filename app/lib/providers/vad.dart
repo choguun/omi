@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_silero_vad/flutter_silero_vad.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
@@ -58,7 +59,10 @@ class AudioProcessorService {
   AudioProcessorService({this.sampleRate = 16000, this.frameSize = 40});
 
   /// Gets the file path where the VAD model is stored.
-  Future<String> get modelPath async => '${(await getApplicationSupportDirectory()).path}/silero_vad.onnx';
+  Future<String?> get modelPath async {
+    if (kIsWeb) return null;
+    return '${(await getApplicationSupportDirectory()).path}/silero_vad.onnx';
+  }
 
   /// Opus decoder instance
   late SimpleOpusDecoder opusDecoder;
@@ -66,29 +70,32 @@ class AudioProcessorService {
 
   /// Initializes the VAD model and prepares the service for processing audio data.
   Future<void> init() async {
-    await onnxModelToLocal();
-    await vad.initialize(
-      modelPath: await modelPath,
-      sampleRate: sampleRate,
-      frameSize: frameSize,
-      threshold: 0.2,
-      minSilenceDurationMs: 100,
-      speechPadMs: 0,
-    );
+    if (!kIsWeb) {
+      await onnxModelToLocal();
+      final path = await modelPath;
+      if (path != null) {
+        await vad.initialize(
+          modelPath: path,
+          sampleRate: sampleRate,
+          frameSize: frameSize,
+          threshold: 0.2,
+          minSilenceDurationMs: 100,
+          speechPadMs: 0,
+        );
+      }
+    }
+    
     opusDecoder = SimpleOpusDecoder(sampleRate: sampleRate, channels: 1);
     isInited = true;
 
-    // processedAudioSubscription = processedAudioStreamController.stream.listen((buffer) async {
-    //   final outputPath = '${(await getApplicationDocumentsDirectory()).path}/output.wav';
-    //   saveAsWav(buffer, outputPath);
-    //   print('saved');
-    // });
-    Timer(const Duration(seconds: 30), () async {
-      print('Timer started');
-      Uint8List wavBytes = WavBytesUtil.getUInt8ListBytes(validFrames, sampleRate);
-      final file = File('${(await getApplicationDocumentsDirectory()).path}/output.wav');
-      await file.writeAsBytes(wavBytes);
-    });
+    if (!kIsWeb) {
+      Timer(const Duration(seconds: 30), () async {
+        print('Timer started (mobile only)');
+        Uint8List wavBytes = WavBytesUtil.getUInt8ListBytes(validFrames, sampleRate);
+        final file = File('${(await getApplicationDocumentsDirectory()).path}/output.wav');
+        await file.writeAsBytes(wavBytes);
+      });
+    }
   }
 
   /// Processes incoming audio data chunks and performs VAD on them.
@@ -158,7 +165,11 @@ class AudioProcessorService {
   /// [buffer]: A list of bytes representing the audio data to save.
   /// [filePath]: The file path where the WAV file will be saved.
   void saveAsWav(List<int> buffer, String filePath) {
-    // Convert PCM data
+    if (kIsWeb) {
+      debugPrint("saveAsWav called on web - not implemented for direct file saving.");
+      return;
+    }
+    // Mobile-specific file saving
     final bytes = Uint8List.fromList(buffer);
     final pcmData = Int16List.view(bytes.buffer);
     final byteBuffer = ByteData(pcmData.length * 2);
@@ -170,7 +181,6 @@ class AudioProcessorService {
     final wavHeader = ByteData(44);
     final pcmBytes = byteBuffer.buffer.asUint8List();
 
-    // RIFF chunk
     wavHeader
       ..setUint8(0x00, 0x52) // 'R'
       ..setUint8(0x01, 0x49) // 'I'
@@ -223,8 +233,16 @@ class AudioProcessorService {
 
   /// Copies the ONNX VAD model from the assets to the local application directory.
   Future<void> onnxModelToLocal() async {
+    if (kIsWeb) {
+      debugPrint("onnxModelToLocal called on web - VAD model should be fetched differently.");
+      return;
+    }
+    // Mobile-specific model saving from assets
     final data = await rootBundle.load('assets/silero_vad.v5.onnx');
     final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-    File(await modelPath).writeAsBytesSync(bytes);
+    final path = await modelPath;
+    if (path != null) {
+      File(path).writeAsBytesSync(bytes);
+    }
   }
 }

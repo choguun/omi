@@ -9,6 +9,8 @@ import 'package:omi/services/devices.dart';
 import 'package:omi/services/sockets.dart';
 import 'package:omi/services/wals.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
+import 'package:opus_dart/opus_dart.dart';
 
 class ServiceManager {
   late IMicRecorderService _mic;
@@ -21,13 +23,17 @@ class ServiceManager {
 
   static ServiceManager _create() {
     ServiceManager sm = ServiceManager();
-    sm._mic = MicRecorderBackgroundService(
-      runner: BackgroundService(),
-    );
+    if (kIsWeb) {
+      sm._mic = MicRecorderService(); // Use MicRecorderService for web
+    } else {
+      sm._mic = MicRecorderBackgroundService(
+        runner: BackgroundService(),
+      );
+    }
     sm._device = DeviceService();
     sm._socket = SocketServicePool();
     sm._wal = WalService();
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       sm._systemAudio = MacSystemAudioRecorderService();
     }
 
@@ -51,7 +57,7 @@ class ServiceManager {
   IWalService get wal => _wal;
 
   ISystemAudioRecorderService get systemAudio {
-    if (!Platform.isMacOS) {
+    if (kIsWeb || !Platform.isMacOS) {
       throw Exception("System audio recording is only available on macOS");
     }
     return _systemAudio;
@@ -67,7 +73,7 @@ class ServiceManager {
   Future<void> start() async {
     _device.start();
     _wal.start();
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       // TODO: Decide if system audio should start automatically or be user-initiated
       // await _systemAudio.start();
     }
@@ -77,7 +83,7 @@ class ServiceManager {
     await _wal.stop();
     _mic.stop();
     _device.stop();
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       _systemAudio.stop();
     }
   }
@@ -100,7 +106,7 @@ Future onStart(ServiceInstance service) async {
   // Recorder
   MicRecorderService? recorder;
   service.on('recorder.start').listen((event) async {
-    recorder = MicRecorderService(isInBG: Platform.isAndroid ? true : false);
+    recorder = MicRecorderService(isInBG: !kIsWeb && Platform.isAndroid ? true : false);
     recorder?.start(onByteReceived: (bytes) {
       Uint8List audioBytes = bytes;
       List<dynamic> audioBytesList = audioBytes.toList();
@@ -256,6 +262,7 @@ abstract class IMicRecorderService {
     Function()? onInitializing,
   });
   void stop();
+  int? get actualSampleRate;
 }
 
 class MicRecorderBackgroundService implements IMicRecorderService {
@@ -288,17 +295,23 @@ class MicRecorderBackgroundService implements IMicRecorderService {
   void stop() {
     _runner.stopRecorder();
   }
+
+  @override
+  int? get actualSampleRate => 16000;
 }
 
 class MicRecorderService implements IMicRecorderService {
   RecorderServiceStatus? _status;
+  int? _actualSampleRate;
 
   late FlutterSoundRecorder _recorder;
-  late StreamController<Uint8List> _controller;
+  StreamController<Uint8List>? _pcmController;
+  StreamSubscription? _opusSubscription;
 
   Function(Uint8List bytes)? _onByteReceived;
   Function? _onRecording;
   Function? _onStop;
+  Function? _onInitializing;
 
   bool _isInBG = false;
 
@@ -308,6 +321,9 @@ class MicRecorderService implements IMicRecorderService {
   }
 
   get status => _status;
+
+  @override
+  int? get actualSampleRate => _actualSampleRate;
 
   @override
   Future<void> start({
@@ -323,44 +339,106 @@ class MicRecorderService implements IMicRecorderService {
       throw Exception("Recorder is initialising");
     }
 
-    _status = RecorderServiceStatus.initialising;
-
-    // callback
+    // Assign core callbacks first
     _onByteReceived = onByteReceived;
-    _onStop = onStop;
     _onRecording = onRecording;
-    if (_onRecording != null) {
-      _onRecording!();
-    }
+    _onStop = onStop;
+    _onInitializing = onInitializing;
 
-    // new record
+    _status = RecorderServiceStatus.initialising;
+    if (_onInitializing != null) _onInitializing!();
+
     await _recorder.openRecorder(isBGService: _isInBG);
-    _controller = StreamController<Uint8List>();
+
+    if (kIsWeb) {
+      var webSampleRate = await _recorder.getSampleRate();
+      debugPrint('Actual recording sample rate on web (raw value from recorder): $webSampleRate');
+      _actualSampleRate = 16000; // Try 16000Hz for web, a standard Opus rate
+      if (webSampleRate == null || webSampleRate == 0) {
+        debugPrint('Warning: getSampleRate() returned $webSampleRate. Using determined $_actualSampleRate Hz.');
+      } else if (webSampleRate != _actualSampleRate) {
+        debugPrint('Note: Browser reported sample rate $webSampleRate, but we are targeting $_actualSampleRate Hz for Opus encoding.');
+      }
+    } else {
+      _actualSampleRate = 16000;
+    }
+    debugPrint('Using effective sample rate for PCM capture: $_actualSampleRate');
+
+    _pcmController = StreamController<Uint8List>();
 
     await _recorder.startRecorder(
-      toStream: _controller.sink,
+      toStream: _pcmController!.sink,
       codec: Codec.pcm16,
       numChannels: 1,
-      sampleRate: 16000,
-      bufferSize: 8192,
+      sampleRate: _actualSampleRate,
     );
-    _controller.stream.listen((buffer) {
-      Uint8List audioBytes = buffer;
-      if (_onByteReceived != null) {
-        _onByteReceived!(audioBytes);
-      }
-    });
 
+    if (_onRecording != null) _onRecording!();
     _status = RecorderServiceStatus.recording;
+
+    final opusStream = _pcmController!.stream.cast<List<int>>().transform(
+      StreamOpusEncoder.bytes(
+        floatInput: false,
+        sampleRate: _actualSampleRate!,
+        channels: 1,
+        application: Application.audio,
+        frameTime: FrameTime.ms20,
+        copyOutput: true,
+        fillUpLastFrame: true,
+      ),
+    );
+
+    _opusSubscription = opusStream.listen(
+      (opusPacket) {
+        if (opusPacket == null) {
+          debugPrint('[MicRecorderService] Null Opus packet received.');
+          return;
+        }
+        debugPrint('[MicRecorderService] Raw Opus packet received, length: ${opusPacket.length}');
+
+        final opusData = Uint8List.fromList(opusPacket);
+        if (opusData.isEmpty) {
+          debugPrint('[MicRecorderService] Empty Opus data after conversion.');
+          return; // Don't send empty packets
+        }
+        final lengthBytes = ByteData(4);
+        lengthBytes.setUint32(0, opusData.lengthInBytes, Endian.little);
+
+        final framedPacket = Uint8List.fromList(
+          lengthBytes.buffer.asUint8List() + opusData,
+        );
+        debugPrint('[MicRecorderService] Sending framed Opus packet, frame content length: ${opusData.lengthInBytes}, total length: ${framedPacket.lengthInBytes}');
+
+        if (_onByteReceived != null) {
+          _onByteReceived!(framedPacket);
+        }
+      },
+      onError: (error) {
+        debugPrint("[MicRecorderService] Opus encoding stream error: $error");
+      },
+      onDone: () {
+        debugPrint("[MicRecorderService] Opus encoding stream done.");
+      },
+    );
     return;
   }
 
   @override
   void stop() {
-    _recorder.stopRecorder();
-    _controller.close();
+    if (_status != RecorderServiceStatus.recording && _status != RecorderServiceStatus.initialising) {
+      debugPrint("Recorder not recording or initialising. Stop called in state: $_status");
+      return;
+    }
 
-    // callback
+    _recorder.stopRecorder().then((_) {
+      debugPrint("FlutterSoundRecorder stopped.");
+    }).catchError((e) {
+      debugPrint("Error stopping FlutterSoundRecorder: $e");
+    });
+
+    _opusSubscription?.cancel();
+    _pcmController?.close();
+
     _status = RecorderServiceStatus.stop;
     if (_onStop != null) {
       _onStop!();
@@ -369,6 +447,9 @@ class MicRecorderService implements IMicRecorderService {
     _onByteReceived = null;
     _onStop = null;
     _onRecording = null;
+    _onInitializing = null;
+    _opusSubscription = null;
+    _pcmController = null;
   }
 }
 

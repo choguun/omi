@@ -1,0 +1,62 @@
+<head>
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+  <meta name="google-signin-client_id" content="1031333818730-l9meebge7tpc0qmquvq6t5qpoe09o1ra.apps.googleusercontent.com">
+<!-- 387631603513-9842bdocu7uhfvcd8jq84026rsl1j7bd.apps.googleusercontent.com -->
+  <!-- iOS meta tags & icons -->
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>omi</title>
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <!-- Add these Firebase SDK scripts -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+  <script>
+    // TODO: Replace with your actual Firebase project configuration
+    const firebaseConfig = {
+      apiKey: "AIzaSyA42Po1b2Rerv8h1Nla5i8aO4ayigIZVFk",
+      authDomain: "based-hardware-dev.firebaseapp.com",
+      projectId: "based-hardware-dev",
+      storageBucket: "based-hardware-dev.firebasestorage.app",
+      messagingSenderId: "1031333818730",
+      appId: "1:1031333818730:web:74db1cea21bcc16fafb513"
+    };
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+  </script>
+
+  <!-- Intercom Snippet -->
+  <script>
+    window.intercomSettings = {
+      api_base: "https://api-iam.intercom.io",
+      app_id: "omi-37041f50f654" // <<< YOU MUST REPLACE THIS
+    };
+  </script>
+  <script>
+  (function(){var w=window;var ic=w.Intercom;if(typeof ic==="function"){ic('reattach_activator');ic('update',w.intercomSettings);}else{var d=document;var i=function(){i.c(arguments);};i.q=[];i.c=function(args){i.q.push(args);};w.Intercom=i;var l=function(){var s=d.createElement('script');s.type='text/javascript';s.async=true;s.src='https://widget.intercom.io/widget/YOUR_INTERCOM_APP_ID';var x=d.getElementsByTagName('script')[0];x.parentNode.insertBefore(s,x);};if(document.readyState==='complete'){l();}else if(w.attachEvent){w.attachEvent('onload',l);}else{w.addEventListener('load',l,false);}}})();
+  </script>
+  <!-- End Intercom Snippet -->
+
+  <script>
+    // The value below is injected by flutter build, do not touch.
+    var serviceWorkerVersion = null;
+  </script>
+  <!-- This script installs service_worker.js to provide PWA functionality to
+       application. For more information, see:
+       https://developers.google.com/web/fundamentals/primers/service-workers -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('flutter-first-frame', function () {
+        navigator.serviceWorker.register('flutter_service_worker.js?v=' + serviceWorkerVersion);
+      });
+    }
+  </script>
+  <script src="main.dart.js" type="application/javascript"></script>
+</body>
+</html> 

@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:collection/collection.dart';
 import 'package:uuid/uuid.dart';
 
@@ -6,6 +7,7 @@ enum MessageSender { ai, human }
 enum MessageType {
   text('text'),
   daySummary('day_summary'),
+  error('error'),
   ;
 
   final String value;
@@ -61,24 +63,43 @@ class MessageConversation {
 
 class MessageFile {
   String id;
-  String openaiFileId;
+  String? openaiFileId;
   String? thumbnail;
   String? thumbnailName;
   String name;
   String mimeType;
   DateTime createdAt;
+  int size;
 
-  MessageFile(this.openaiFileId, this.thumbnail, this.name, this.mimeType, this.id, this.createdAt, this.thumbnailName);
+  String? localPath;
+  Uint8List? bytes;
+  String? appId;
+
+  MessageFile({
+    required this.id,
+    this.openaiFileId,
+    this.thumbnail,
+    this.thumbnailName,
+    required this.name,
+    required this.mimeType,
+    required this.createdAt,
+    required this.size,
+    this.localPath,
+    this.bytes,
+    this.appId,
+  });
 
   static MessageFile fromJson(Map<String, dynamic> json) {
     return MessageFile(
-      json['openai_file_id'],
-      json['thumbnail'],
-      json['name'],
-      json['mime_type'],
-      json['id'],
-      DateTime.parse(json['created_at']).toLocal(),
-      json['thumb_name'],
+      id: json['id'],
+      openaiFileId: json['openai_file_id'],
+      thumbnail: json['thumbnail'],
+      name: json['name'],
+      mimeType: json['mime_type'],
+      createdAt: DateTime.parse(json['created_at']).toLocal(),
+      thumbnailName: json['thumb_name'],
+      size: json['size'] ?? 0,
+      appId: json['app_id'],
     );
   }
 
@@ -88,13 +109,15 @@ class MessageFile {
 
   Map<String, dynamic> toJson() {
     return {
+      'id': id,
       'openai_file_id': openaiFileId,
       'thumbnail': thumbnail,
       'name': name,
       'mime_type': mimeType,
-      'id': id,
       'created_at': createdAt.toUtc().toIso8601String(),
       'thumb_name': thumbnailName,
+      'size': size,
+      'app_id': appId,
     };
   }
 
@@ -124,6 +147,8 @@ class ServerMessage {
   bool askForNps = false;
 
   List<String> thinkings = [];
+  bool isVoice;
+  MessageFile? localAudioFile;
 
   ServerMessage(
     this.id,
@@ -137,6 +162,8 @@ class ServerMessage {
     this.filesId,
     this.memories, {
     this.askForNps = false,
+    this.isVoice = false,
+    this.localAudioFile,
   });
 
   static ServerMessage fromJson(Map<String, dynamic> json) {
@@ -144,7 +171,7 @@ class ServerMessage {
       json['id'],
       DateTime.parse(json['created_at']).toLocal(),
       json['text'] ?? "",
-      MessageSender.values.firstWhere((e) => e.toString().split('.').last == json['sender']),
+      MessageSender.values.firstWhere((e) => e.toString().split('.').last == json['sender'], orElse: () => MessageSender.ai),
       MessageType.valuesFromString(json['type']),
       json['plugin_id'],
       json['from_integration'] ?? false,
@@ -152,6 +179,7 @@ class ServerMessage {
       (json['files_id'] ?? []).map((m) => m.toString()).toList(),
       ((json['memories'] ?? []) as List<dynamic>).map((m) => MessageConversation.fromJson(m)).toList(),
       askForNps: json['ask_for_nps'] ?? false,
+      isVoice: json['is_voice'] ?? false,
     );
   }
 
@@ -161,13 +189,48 @@ class ServerMessage {
       'created_at': createdAt.toUtc().toIso8601String(),
       'text': text,
       'sender': sender.toString().split('.').last,
-      'type': type.toString().split('.').last,
+      'type': type.value,
       'plugin_id': appId,
       'from_integration': fromIntegration,
       'memories': memories.map((m) => m.toJson()).toList(),
       'ask_for_nps': askForNps,
       'files': files.map((m) => m.toJson()).toList(),
+      'is_voice': isVoice,
     };
+  }
+
+  ServerMessage copyWith({
+    String? id,
+    DateTime? createdAt,
+    String? text,
+    MessageSender? sender,
+    MessageType? type,
+    String? appId,
+    bool? fromIntegration,
+    List<MessageFile>? files,
+    List? filesId,
+    List<MessageConversation>? memories,
+    bool? askForNps,
+    List<String>? thinkings,
+    bool? isVoice,
+    MessageFile? localAudioFile,
+    bool setLocalAudioFileToNull = false,
+  }) {
+    return ServerMessage(
+      id ?? this.id,
+      createdAt ?? this.createdAt,
+      text ?? this.text,
+      sender ?? this.sender,
+      type ?? this.type,
+      appId ?? this.appId,
+      fromIntegration ?? this.fromIntegration,
+      files ?? this.files,
+      filesId ?? this.filesId,
+      memories ?? this.memories,
+      askForNps: askForNps ?? this.askForNps,
+      isVoice: isVoice ?? this.isVoice,
+      localAudioFile: setLocalAudioFileToNull ? null : (localAudioFile ?? this.localAudioFile),
+    )..thinkings = thinkings ?? this.thinkings;
   }
 
   bool areFilesOfSameType() {
@@ -181,7 +244,7 @@ class ServerMessage {
 
   static ServerMessage empty({String? appId}) {
     return ServerMessage(
-      '0000',
+      const Uuid().v4(),
       DateTime.now(),
       '',
       MessageSender.ai,
@@ -191,6 +254,7 @@ class ServerMessage {
       [],
       [],
       [],
+      isVoice: false,
     );
   }
 
@@ -206,6 +270,7 @@ class ServerMessage {
       [],
       [],
       [],
+      isVoice: false,
     );
   }
 

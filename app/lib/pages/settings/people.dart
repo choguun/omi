@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:collection/collection.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/providers/people_provider.dart';
@@ -40,7 +41,7 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
   }
 
   Widget _showPersonDialogForm(formKey, nameController) {
-    return Platform.isIOS
+    return !kIsWeb && Platform.isIOS
         ? Material(
             color: Colors.transparent,
             child: Theme(
@@ -107,7 +108,7 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
       }
     }
 
-    return Platform.isIOS
+    return !kIsWeb && Platform.isIOS
         ? [
             CupertinoDialogAction(
               onPressed: () => Navigator.pop(context),
@@ -142,7 +143,7 @@ class _UserPeoplePageState extends State<_UserPeoplePage> {
 
     await showDialog(
       context: context,
-      builder: (BuildContext context) => Platform.isIOS
+      builder: (BuildContext context) => !kIsWeb && Platform.isIOS
           ? CupertinoAlertDialog(
               title: Text(person == null ? 'Add New Person' : 'Edit Person'),
               content: _showPersonDialogForm(formKey, nameController),

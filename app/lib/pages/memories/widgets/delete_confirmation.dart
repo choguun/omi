@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 class DeleteConfirmation {
@@ -8,7 +9,7 @@ class DeleteConfirmation {
     title ??= 'Delete memory?';
     content ??= 'This action cannot be undone.';
 
-    if (Platform.isIOS) {
+    if (!kIsWeb && Platform.isIOS) {
       return await showCupertinoDialog<bool>(
             context: context,
             builder: (context) => CupertinoAlertDialog(

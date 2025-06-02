@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/main.dart';
 
@@ -36,7 +37,7 @@ class AppDialog {
               ),
             ),
           ];
-    if (Platform.isIOS) {
+    if (!kIsWeb && Platform.isIOS) {
       return CupertinoAlertDialog(
         title: Text(title),
         content: Text(content),

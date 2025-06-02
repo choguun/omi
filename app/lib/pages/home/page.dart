@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -203,7 +204,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       _initiateApps();
 
       // ForegroundUtil.requestPermissions();
-      if (!Platform.isMacOS) {
+      if (!kIsWeb && !Platform.isMacOS) {
         await ForegroundUtil.initializeForegroundService();
         ForegroundUtil.startForegroundTask();
       }
@@ -281,7 +282,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   Widget build(BuildContext context) {
     return MyUpgradeAlert(
       upgrader: _upgrader,
-      dialogStyle: Platform.isIOS ? UpgradeDialogStyle.cupertino : UpgradeDialogStyle.material,
+      dialogStyle: !kIsWeb && Platform.isIOS ? UpgradeDialogStyle.cupertino : UpgradeDialogStyle.material,
       child: Consumer<ConnectivityProvider>(
         builder: (ctx, connectivityProvider, child) {
           bool isConnected = connectivityProvider.isConnected;
@@ -551,7 +552,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     return AppBar(
       automaticallyImplyLeading: false,
       backgroundColor: Theme.of(context).colorScheme.surface,
-      toolbarHeight: Platform.isMacOS ? 80 : null,
+      toolbarHeight: !kIsWeb && Platform.isMacOS ? 80 : null,
       title: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.center,

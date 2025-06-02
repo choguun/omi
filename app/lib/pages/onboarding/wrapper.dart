@@ -47,7 +47,7 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
 
   @override
   void initState() {
-    _controller = TabController(length: 7, vsync: this);
+    _controller = TabController(length: 3, vsync: this);
     _controller!.addListener(() => setState(() {}));
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
@@ -120,54 +120,55 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
         MixpanelManager().onboardingStepCompleted('Name');
       }),
       PrimaryLanguageWidget(goNext: () {
-        _goNext(); // Go to Permissions page
+        // _goNext(); // Go to Permissions page
+        routeToPage(context, const HomePageWrapper(), replace: true);
         MixpanelManager().onboardingStepCompleted('Primary Language');
       }),
-      PermissionsWidget(
-        goNext: () {
-          _goNext(); // Go to Welcome page
-          MixpanelManager().onboardingStepCompleted('Permissions');
-        },
-      ),
-      WelcomePage(
-        goNext: () {
-          _goNext(); // Go to Find Devices page
-          MixpanelManager().onboardingStepCompleted('Welcome');
-        },
-      ),
-      FindDevicesPage(
-        isFromOnboarding: true,
-        onSkip: () {
-          // Skipping device finding means skipping speech profile too
-          routeToPage(context, const HomePageWrapper(), replace: true);
-        },
-        goNext: () async {
-          var provider = context.read<OnboardingProvider>();
-          MixpanelManager().onboardingStepCompleted('Find Devices');
+      // PermissionsWidget(
+      //   goNext: () {
+      //     _goNext(); // Go to Welcome page
+      //     MixpanelManager().onboardingStepCompleted('Permissions');
+      //   },
+      // ),
+      // WelcomePage(
+      //   goNext: () {
+      //     _goNext(); // Go to Find Devices page
+      //     MixpanelManager().onboardingStepCompleted('Welcome');
+      //   },
+      // ),
+      // FindDevicesPage(
+      //   isFromOnboarding: true,
+      //   onSkip: () {
+      //     // Skipping device finding means skipping speech profile too
+      //     routeToPage(context, const HomePageWrapper(), replace: true);
+      //   },
+      //   goNext: () async {
+      //     var provider = context.read<OnboardingProvider>();
+      //     MixpanelManager().onboardingStepCompleted('Find Devices');
 
-          if (hasSpeechProfile) {
-            routeToPage(context, const HomePageWrapper(), replace: true);
-          } else {
-            var codec = await _getAudioCodec(provider.deviceId);
-            if (codec.isOpusSupported()) {
-              _goNext(); // Go to Speech Profile page
-            } else {
-              // Device selected, but not Opus, skip speech profile
-              routeToPage(context, const HomePageWrapper(), replace: true);
-            }
-          }
-        },
-      ),
-      SpeechProfileWidget(
-        goNext: () {
-          routeToPage(context, const HomePageWrapper(), replace: true);
-          MixpanelManager().onboardingStepCompleted('Speech Profile');
-        },
-        onSkip: () {
-          routeToPage(context, const HomePageWrapper(), replace: true);
-          MixpanelManager().onboardingStepCompleted('Speech Profile Skipped');
-        },
-      ),
+      //     if (hasSpeechProfile) {
+      //       routeToPage(context, const HomePageWrapper(), replace: true);
+      //     } else {
+      //       var codec = await _getAudioCodec(provider.deviceId);
+      //       if (codec.isOpusSupported()) {
+      //         _goNext(); // Go to Speech Profile page
+      //       } else {
+      //         // Device selected, but not Opus, skip speech profile
+      //         routeToPage(context, const HomePageWrapper(), replace: true);
+      //       }
+      //     }
+      //   },
+      // ),
+      // SpeechProfileWidget(
+      //   goNext: () {
+      //     routeToPage(context, const HomePageWrapper(), replace: true);
+      //     MixpanelManager().onboardingStepCompleted('Speech Profile');
+      //   },
+      //   onSkip: () {
+      //     routeToPage(context, const HomePageWrapper(), replace: true);
+      //     MixpanelManager().onboardingStepCompleted('Speech Profile Skipped');
+      //   },
+      // ),
     ];
 
     return GestureDetector(

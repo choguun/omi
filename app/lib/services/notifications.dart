@@ -7,6 +7,7 @@ import 'dart:ui';
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
@@ -126,16 +127,18 @@ class NotificationService {
     if (token == null) return;
     String timeZone = await getTimeZone();
     if (FirebaseAuth.instance.currentUser != null && token.isNotEmpty) {
-      await Intercom.instance.sendTokenToIntercom(token);
+      if (!kIsWeb) {
+        await Intercom.instance.sendTokenToIntercom(token);
+      }
       await saveFcmTokenServer(token: token, timeZone: timeZone);
     }
   }
 
   void saveNotificationToken() async {
-    if (Platform.isIOS) {
+    if (!kIsWeb && Platform.isIOS) {
       await _firebaseMessaging.getAPNSToken();
     }
-    if (Platform.isMacOS) return;
+    if (!kIsWeb && Platform.isMacOS) return;
     String? token = await _firebaseMessaging.getToken();
     await saveFcmToken(token);
     _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
@@ -162,6 +165,7 @@ class NotificationService {
 
   // FIXME: Causes the different behavior on android and iOS
   bool _shouldShowForegroundNotificationOnFCMMessageReceived() {
+    if (kIsWeb) return false;
     return Platform.isAndroid;
   }
 
@@ -219,22 +223,24 @@ class NotificationUtil {
   }
 
   static Future<void> initializeIsolateReceivePort() async {
-    receivePort = ReceivePort('Notification action port in main isolate');
-    receivePort!.listen((serializedData) {
-      final receivedAction = ReceivedAction().fromMap(serializedData);
-      onActionReceivedMethodImpl(receivedAction);
-    });
+    if (!kIsWeb) {
+      receivePort = ReceivePort('Notification action port in main isolate');
+      receivePort!.listen((serializedData) {
+        final receivedAction = ReceivedAction().fromMap(serializedData);
+        onActionReceivedMethodImpl(receivedAction);
+      });
 
-    // This initialization only happens on main isolate
-    IsolateNameServer.registerPortWithName(receivePort!.sendPort, 'notification_action_port');
+      // This initialization only happens on main isolate
+      IsolateNameServer.registerPortWithName(receivePort!.sendPort, 'notification_action_port');
+    }
   }
 
   /// Use this method to detect when the user taps on a notification or action button
   @pragma("vm:entry-point")
   static Future<void> onActionReceivedMethod(ReceivedAction receivedAction) async {
-    if (receivePort != null) {
+    if (!kIsWeb && receivePort != null) {
       await onActionReceivedMethodImpl(receivedAction);
-    } else {
+    } else if (!kIsWeb) {
       print(
           'onActionReceivedMethod was called inside a parallel dart isolate, where receivePort was never initialized.');
       SendPort? sendPort = IsolateNameServer.lookupPortByName('notification_action_port');
@@ -244,6 +250,9 @@ class NotificationUtil {
         dynamic serializedData = receivedAction.toMap();
         sendPort.send(serializedData);
       }
+    } else {
+      // Handle web scenario if needed, or leave empty if not applicable
+      await onActionReceivedMethodImpl(receivedAction);
     }
   }
 

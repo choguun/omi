@@ -1,5 +1,6 @@
 import 'dart:io'; // Added for Platform check
 
+import 'package:flutter/foundation.dart' show kIsWeb; // Add kIsWeb import
 import 'package:flutter/material.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
@@ -76,7 +77,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
   _toggleRecording(BuildContext context, CaptureProvider provider) async {
     var recordingState = provider.recordingState;
 
-    if (Platform.isMacOS) {
+    if (!kIsWeb && Platform.isMacOS) {
       if (recordingState == RecordingState.systemAudioRecord) {
         await provider.stopSystemAudioRecording();
         // MixpanelManager().track("System Audio Recording Stopped");
@@ -121,8 +122,9 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
     bool deviceServiceStateOk = captureProvider.recordingDeviceServiceReady;
     bool transcriptServiceStateOk = captureProvider.transcriptServiceReady;
     bool isHavingTranscript = captureProvider.segments.isNotEmpty;
-    bool isHavingDesireDevice = SharedPreferencesUtil().btDevice.id.isNotEmpty;
+    bool isHavingDesireDevice = SharedPreferencesUtil().btDevice.id.isNotEmpty && (!kIsWeb && !Platform.isMacOS);
     bool isHavingRecordingDevice = captureProvider.havingRecordingDevice;
+    final bool isMac = !kIsWeb && Platform.isMacOS;
 
     bool isUsingPhoneMic = captureProvider.recordingState == RecordingState.record ||
         captureProvider.recordingState == RecordingState.initialising ||
@@ -281,13 +283,13 @@ getPhoneMicRecordingButton(BuildContext context, VoidCallback toggleRecordingCb,
   // as the primary interaction should be via the BT device, not system audio as a fallback to phone mic.
   // This button is primarily for when NO BT device is the target.
   final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
-  if (Platform.isMacOS &&
+  if (!kIsWeb && Platform.isMacOS &&
       deviceProvider.connectedDevice != null &&
       SharedPreferencesUtil().btDevice.id == deviceProvider.connectedDevice!.id) {
     return const SizedBox.shrink();
   }
 
-  final bool isMac = Platform.isMacOS;
+  final bool isMac = !kIsWeb && Platform.isMacOS;
   String text;
   Widget icon;
   bool isLoading = currentActualState == RecordingState.initialising;

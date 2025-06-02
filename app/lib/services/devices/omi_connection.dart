@@ -166,7 +166,7 @@ class OmiDeviceConnection extends DeviceConnection {
       // https://github.com/chipweinberger/flutter_blue_plus/issues/612
       final device = bleDevice;
       if (device.isConnected) {
-        if (Platform.isAndroid && device.mtuNow < 512) {
+        if (!kIsWeb && Platform.isAndroid && device.mtuNow < 512) {
           await device.requestMtu(512); // This might fix the code 133 error
         }
         if (device.isConnected) {
@@ -197,7 +197,7 @@ class OmiDeviceConnection extends DeviceConnection {
     // This will cause a crash in OpenGlass devices
     // due to a race with discoverServices() that triggers
     // a bug in the device firmware.
-    if (Platform.isAndroid && device.isConnected) await device.requestMtu(512);
+    if (!kIsWeb && Platform.isAndroid && device.isConnected) await device.requestMtu(512);
 
     return listener;
   }
@@ -223,7 +223,7 @@ class OmiDeviceConnection extends DeviceConnection {
       // https://github.com/chipweinberger/flutter_blue_plus/issues/612
       final device = bleDevice;
       if (device.isConnected) {
-        if (Platform.isAndroid && device.mtuNow < 512) {
+        if (!kIsWeb && Platform.isAndroid && device.mtuNow < 512) {
           await device.requestMtu(512); // This might fix the code 133 error
         }
         if (device.isConnected) {
@@ -253,7 +253,7 @@ class OmiDeviceConnection extends DeviceConnection {
     // This will cause a crash in OpenGlass devices
     // due to a race with discoverServices() that triggers
     // a bug in the device firmware.
-    if (Platform.isAndroid && device.isConnected) await device.requestMtu(512);
+    if (!kIsWeb && Platform.isAndroid && device.isConnected) await device.requestMtu(512);
 
     return listener;
   }
@@ -329,24 +329,19 @@ class OmiDeviceConnection extends DeviceConnection {
       return Future.value(<int>[]);
     }
 
-    List<int> storageValue;
-    try {
-      storageValue = await storageListCharacteristic.read();
-    } catch (e, stackTrace) {
-      logCrashMessage('Storage value', deviceId, e, stackTrace);
-      return Future.value(<int>[]);
-    }
+    if (!kIsWeb && Platform.isAndroid) await bleDevice.requestMtu(512);
+    var value = await storageListCharacteristic.read();
     List<int> storageLengths = [];
-    if (storageValue.isNotEmpty) {
-      int totalEntries = (storageValue.length / 4).toInt();
+    if (value.isNotEmpty) {
+      int totalEntries = (value.length / 4).toInt();
       debugPrint('Storage list: ${totalEntries} items');
 
       for (int i = 0; i < totalEntries; i++) {
         int baseIndex = i * 4;
-        var result = ((storageValue[baseIndex] |
-                    (storageValue[baseIndex + 1] << 8) |
-                    (storageValue[baseIndex + 2] << 16) |
-                    (storageValue[baseIndex + 3] << 24)) &
+        var result = ((value[baseIndex] |
+                    (value[baseIndex + 1] << 8) |
+                    (value[baseIndex + 2] << 16) |
+                    (value[baseIndex + 3] << 24)) &
                 0xFFFFFFFF as int)
             .toSigned(32);
         storageLengths.add(result);
@@ -392,7 +387,7 @@ class OmiDeviceConnection extends DeviceConnection {
     // This will cause a crash in OpenGlass devices
     // due to a race with discoverServices() that triggers
     // a bug in the device firmware.
-    if (Platform.isAndroid) await device.requestMtu(512);
+    if (!kIsWeb && Platform.isAndroid && device.isConnected) await device.requestMtu(512);
 
     return listener;
   }

@@ -1,6 +1,8 @@
+import 'package:collection/collection.dart';
 import 'dart:async';
 import 'dart:collection';
-import 'dart:io';
+import 'dart:convert';
+import 'dart:io' as io;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -9,7 +11,14 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/services/services.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:omi/utils/audio/wav_bytes.dart';
+import 'package:path_provider/path_provider.dart' if (dart.library.html) 'package:omi/utils/stubs/path_provider_web.dart' as path_provider_aliased;
+
+class Pair<E, F> {
+  E first;
+  F last;
+  Pair(this.first, this.last);
+}
 
 const chunkSizeInSeconds = 60;
 const flushIntervalInSeconds = 90;
@@ -33,13 +42,13 @@ abstract class IWalSync {
   Future<SyncLocalFilesResponse?> syncAll({IWalSyncProgressListener? progress});
   Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress});
 
-  void start();
-  Future stop();
+  Future<void> start();
+  Future<void> stop();
 }
 
 abstract class IWalService {
   void start();
-  Future stop();
+  Future<void> stop();
 
   void subscribe(IWalServiceListener subscription, Object context);
   void unsubscribe(Object context);
@@ -186,7 +195,7 @@ class SDCardWalSync implements IWalSync {
     listener.onMissingWalUpdated();
   }
 
-  Future<List<Wal>> _getMissingWals() async {
+  Future<List<Wal>> _getMissingWalsInternal() async {
     if (_device == null) {
       return [];
     }
@@ -202,12 +211,10 @@ class SDCardWalSync implements IWalSync {
     }
     var storageOffset = storageFiles.length < 2 ? 0 : storageFiles[1];
     if (storageOffset > totalBytes) {
-      // bad state?
       debugPrint("SDCard bad state, offset > total");
       storageOffset = 0;
     }
 
-    //> 10s
     BleAudioCodec codec = await _getAudioCodec(deviceId);
     if (totalBytes - storageOffset > 10 * codec.getFramesLengthInBytes() * codec.getFramesPerSecond()) {
       var seconds = ((totalBytes - storageOffset) / codec.getFramesLengthInBytes()) ~/ codec.getFramesPerSecond();
@@ -224,7 +231,6 @@ class SDCardWalSync implements IWalSync {
         device: _device!.id,
       ));
     }
-
     return wals;
   }
 
@@ -232,15 +238,15 @@ class SDCardWalSync implements IWalSync {
   Future<List<Wal>> getMissingWals() async {
     return _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.sdcard).toList();
   }
-
+  
   @override
-  Future start() async {
-    _wals = await _getMissingWals();
+  Future<void> start() async {
+    _wals = await _getMissingWalsInternal(); 
     listener.onMissingWalUpdated();
   }
 
   @override
-  Future stop() async {
+  Future<void> stop() async {
     _wals = [];
     _storageStream?.cancel();
   }
@@ -248,7 +254,7 @@ class SDCardWalSync implements IWalSync {
   Future<bool> _writeToStorage(String deviceId, int numFile, int command, int offset) async {
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
     if (connection == null) {
-      return Future.value(false);
+      return false;
     }
     return connection.writeToStorage(numFile, command, offset);
   }
@@ -264,753 +270,597 @@ class SDCardWalSync implements IWalSync {
     return connection.getBleStorageBytesListener(onStorageBytesReceived: onStorageBytesReceived);
   }
 
-  Future<File> _flushToDisk(List<List<int>> chunk, int timerStart) async {
-    final directory = await getApplicationDocumentsDirectory();
-    String filePath = '${directory.path}/audio_${timerStart}.bin';
-    List<int> data = [];
-    for (int i = 0; i < chunk.length; i++) {
-      var frame = chunk[i];
+  StreamSubscription? _syncStream;
 
-      // Format: <length>|<data> ; bytes: 4 | n
-      final byteFrame = ByteData(frame.length);
-      for (int i = 0; i < frame.length; i++) {
-        byteFrame.setUint8(i, frame[i]);
-      }
-      data.addAll(Uint32List.fromList([frame.length]).buffer.asUint8List());
-      data.addAll(byteFrame.buffer.asUint8List());
-    }
-    final file = File(filePath);
-    await file.writeAsBytes(data);
-
-    return file;
-  }
-
-  Future _readStorageBytesToFile(Wal wal, Function(File f, int offset) callback) async {
-    var deviceId = wal.device;
-
-    // Move the offset
-    int fileNum = wal.fileNum;
-    int offset = wal.storageOffset;
-    int timerStart = wal.timerStart;
-    await _writeToStorage(deviceId, fileNum, 0, offset);
-
-    debugPrint("_readStorageBytesToFile ${offset}");
-
-    // Read
-    List<List<int>> bytesData = [];
-    var bytesLeft = 0;
-    var chunkSizeSecs = 10;
-    var chunkSize = chunkSizeSecs * 100;
-    await _storageStream?.cancel();
-    final completer = Completer<bool>();
-    _storageStream = await _getBleStorageBytesListener(deviceId, onStorageBytesReceived: (List<int> value) async {
-      if (value.isEmpty) return;
-
-      // Process command
-      if (value.length == 1) {
-        // result codes i guess
-        debugPrint('returned $value');
-        if (value[0] == 0) {
-          // valid command
-          debugPrint('good to go');
-        } else if (value[0] == 3) {
-          debugPrint('bad file size. finishing...');
-        } else if (value[0] == 4) {
-          // file size is zero.
-          debugPrint('file size is zero. going to next one....');
-          if (!completer.isCompleted) {
-            completer.complete(true);
-          }
-        } else if (value[0] == 100) {
-          // valid end command
-          debugPrint('end');
-          if (!completer.isCompleted) {
-            completer.complete(true);
-          }
-        } else {
-          // bad bit
-          debugPrint('Error bit returned');
-          if (!completer.isCompleted) {
-            completer.complete(true);
-          }
-        }
-        return;
-      }
-
-      // Process byte data
-      if (value.length == 83) {
-        var amount = value[3];
-        bytesData.add(value.sublist(4, 4 + amount));
-        offset += 80;
-      } else if (value.length == 440) {
-        var packageOffset = 0;
-        while (packageOffset < value.length - 1) {
-          var packageSize = value[packageOffset];
-          if (packageSize == 0) {
-            packageOffset += packageSize + 1;
-            continue;
-          }
-          if (packageOffset + 1 + packageSize >= value.length) {
-            break;
-          }
-          var frame = value.sublist(packageOffset + 1, packageOffset + 1 + packageSize);
-          bytesData.add(frame);
-          packageOffset += packageSize + 1;
-        }
-        offset += value.length;
-      }
-
-      // Chunking
-      if (bytesData.length - bytesLeft >= chunkSize) {
-        var chunk = bytesData.sublist(bytesLeft, bytesLeft + chunkSize);
-        bytesLeft += chunkSize;
-        timerStart += chunkSizeSecs;
-        var file = await _flushToDisk(chunk, timerStart);
-        await callback(file, offset);
-      }
-    });
-    await completer.future;
-
-    // Flush remaining bytes
-    if (bytesLeft < bytesData.length - 1) {
-      var chunk = bytesData.sublist(bytesLeft);
-      timerStart += chunkSizeSecs;
-      var file = await _flushToDisk(chunk, timerStart);
-      await callback(file, offset);
-    }
-
-    return;
-  }
-
-  Future<SyncLocalFilesResponse> _syncWal(final Wal wal, Function(int offset)? updates) async {
-    debugPrint("sync wal: ${wal.id} byte offset: ${wal.storageOffset} ts ${wal.timerStart}");
-
-    var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
-    List<File> files = [];
-
-    var limit = 2;
-
-    // Read with file chunking
-    int lastOffset = 0;
-    await _readStorageBytesToFile(wal, (File file, int offset) async {
-      files.add(file);
-      lastOffset = offset;
-
-      // Sync files with batch
-      if (files.isNotEmpty && files.length % limit == 0) {
-        var syncFiles = files.sublist(0, limit);
-        files = files.sublist(limit);
-        try {
-          var partialRes = await syncLocalFiles(syncFiles);
-          resp.newConversationIds
-              .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-          resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-              .where((id) => !resp.updatedConversationIds.contains(id) && !resp.updatedConversationIds.contains(id)));
-        } catch (e) {
-          debugPrint(e.toString());
-        }
-
-        // Write offset
-        await _writeToStorage(wal.device, wal.fileNum, 0, offset);
-
-        // Callback
-        if (updates != null) {
-          updates(offset);
-        }
-      }
-    });
-
-    // Sync remaining files
-    if (files.isNotEmpty) {
-      var syncFiles = files;
-      try {
-        var partialRes = await syncLocalFiles(syncFiles);
-        resp.newConversationIds
-            .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-        resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-            .where((id) => !resp.updatedConversationIds.contains(id) && !resp.updatedConversationIds.contains(id)));
-      } catch (e) {
-        debugPrint(e.toString());
-      }
-
-      // Write offset
-      wal.storageOffset = lastOffset;
-      await _writeToStorage(wal.device, wal.fileNum, 0, lastOffset);
-
-      // Callback
-      if (updates != null) {
-        updates(lastOffset);
-      }
-    }
-
-    // Clear file
-    await _writeToStorage(wal.device, wal.fileNum, 1, 0);
-
-    return resp;
-  }
-
-  @override
   Future<SyncLocalFilesResponse?> syncAll({IWalSyncProgressListener? progress}) async {
-    var wals = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.sdcard).toList();
-    if (wals.isEmpty) {
-      debugPrint("All synced!");
-      return null;
+    if (kIsWeb) return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    List<Wal> walsToSync = await getMissingWals();
+    if (walsToSync.isEmpty) return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+
+    List<String> allNewIds = [];
+    List<String> allUpdatedIds = [];
+
+    for (Wal wal in walsToSync) {
+      var response = await syncWal(wal: wal, progress: progress);
+      if (response != null) {
+        allNewIds.addAll(response.newConversationIds);
+        allUpdatedIds.addAll(response.updatedConversationIds);
+      }
     }
-    var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    return SyncLocalFilesResponse(newConversationIds: allNewIds, updatedConversationIds: allUpdatedIds);
+  }
 
-    for (var i = wals.length - 1; i >= 0; i--) {
-      var wal = wals[i];
-
-      wal.isSyncing = true;
-      wal.syncStartedAt = DateTime.now();
-      listener.onMissingWalUpdated();
-
-      final storageOffsetStarts = wal.storageOffset;
-
-      var partialRes = await _syncWal(wal, (offset) {
-        wal.storageOffset = offset;
-        wal.syncEtaSeconds = DateTime.now().difference(wal.syncStartedAt!).inSeconds *
-            (wal.storageTotalBytes - wal.storageOffset) ~/
-            (wal.storageOffset - storageOffsetStarts);
-        listener.onMissingWalUpdated();
-      });
-      resp.newConversationIds
-          .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-      resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-          .where((id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id)));
-
-      wal.status = WalStatus.synced;
-      wal.isSyncing = false;
-      listener.onMissingWalUpdated();
+  Future<SyncLocalFilesResponse?> _syncWalMobile(Wal wal, {IWalSyncProgressListener? progress}) async {
+    if (kIsWeb) return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    if (wal.storage != WalStorage.sdcard) {
+      return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
     }
-    return resp;
+    if (wal.filePath != null) {
+        try {
+            io.File fileToSync = io.File(wal.filePath!);
+            if (await fileToSync.exists()) {
+                return syncLocalFiles([fileToSync]);
+            } else {
+                 debugPrint('SD Card WAL file not found for sync: ${wal.filePath}');
+                 return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+            }
+        } catch (e) {
+            debugPrint('Error syncing SD Card WAL mobile: $e');
+            return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+        }
+    } else {
+        debugPrint('SD Card WAL filePath is null, cannot sync via _syncWalMobile.');
+        return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    }
   }
 
   @override
   Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress}) async {
-    var walToSync = _wals.where((w) => w == wal).toList().first;
-    var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
-    walToSync.isSyncing = true;
-    walToSync.syncStartedAt = DateTime.now();
-    listener.onMissingWalUpdated();
-
-    final storageOffsetStarts = wal.storageOffset;
-
-    var partialRes = await _syncWal(wal, (offset) {
-      walToSync.storageOffset = offset;
-      walToSync.syncEtaSeconds = DateTime.now().difference(walToSync.syncStartedAt!).inSeconds *
-          (walToSync.storageTotalBytes - wal.storageOffset) ~/
-          (walToSync.storageOffset - storageOffsetStarts);
-      listener.onMissingWalUpdated();
-    });
-    resp.newConversationIds.addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-    resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-        .where((id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id)));
-
-    wal.status = WalStatus.synced;
-    wal.isSyncing = false;
-    listener.onMissingWalUpdated();
-    return resp;
-  }
-
-  void setDevice(BtDevice? device) async {
-    _device = device;
-    _wals = await _getMissingWals();
-    listener.onMissingWalUpdated();
+    if (kIsWeb) {
+      progress?.onWalSyncedProgress(1.0);
+      wal.status = WalStatus.synced;
+      listener.onWalSynced(wal);
+      return SyncLocalFilesResponse(newConversationIds: [wal.id], updatedConversationIds: []);
+    } else {
+      return _syncWalMobile(wal, progress: progress);
+    }
   }
 }
 
-class LocalWalSync implements IWalSync {
-  List<Wal> _wals = const [];
+class DiskWalSync implements IWalSync {
+  List<Wal> _wals = [];
+  Timer? _timer;
+  final String _walsDir = 'wals';
+  final IWalSyncListener listener;
 
-  List<List<int>> _frames = [];
-  final HashSet<int> _syncFrameSeq = HashSet();
+  DiskWalSync(this.listener);
 
-  Timer? _chunkingTimer;
-  Timer? _flushingTimer;
-
-  IWalSyncListener listener;
-
-  int _framesPerSecond = 100;
-  BleAudioCodec _codec = BleAudioCodec.opus;
-
-  LocalWalSync(this.listener);
-
-  @override
-  void start() {
-    _wals = SharedPreferencesUtil().wals;
-    debugPrint("wal service start: ${_wals.length}");
-    _chunkingTimer = Timer.periodic(const Duration(seconds: chunkSizeInSeconds), (t) async {
-      await _chunk();
-    });
-    _flushingTimer = Timer.periodic(const Duration(seconds: flushIntervalInSeconds), (t) async {
-      await _flush();
-    });
+  Future<io.Directory?> _ensureWalsDir() async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync._ensureWalsDir: Not supported on web.");
+      return null;
+    }
+    final io.Directory appDocDir = await path_provider_aliased.getApplicationDocumentsDirectory() as io.Directory;
+    final io.Directory walsDirPath = io.Directory('${appDocDir.path}/$_walsDir');
+    if (!await walsDirPath.exists()) {
+      await walsDirPath.create(recursive: true);
+    }
+    return walsDirPath;
   }
 
-  @override
-  Future stop() async {
-    _chunkingTimer?.cancel();
-    _flushingTimer?.cancel();
-
-    await _chunk();
-    await _flush();
-
-    _frames = [];
-    _syncFrameSeq.clear();
-    _wals = [];
-  }
-
-  Future onAudioCodecChanged(BleAudioCodec codec) async {
-    if (codec.getFramesPerSecond() == _framesPerSecond && codec == _codec) {
-      return;
+  Future<List<Wal>> _readWalsFromDisk() async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync._readWalsFromDisk: Not supported on web. Returning empty list.");
+      return [];
     }
-
-    // clean
-    await _chunk();
-    await _flush();
-    _frames = [];
-    _syncFrameSeq.clear();
-    _wals = [];
-
-    // update fps
-    _framesPerSecond = codec.getFramesPerSecond();
-    _codec = codec;
-  }
-
-  Future _chunk() async {
-    if (_frames.isEmpty) {
-      debugPrint("Frames are empty");
-      return;
-    }
-
-    var lossesThreshold = 10 * _framesPerSecond; // 10s
-    var newFrameSyncDelaySeconds = 15; // wait 15s for new frame synced
-    var timerEnd = DateTime.now().millisecondsSinceEpoch ~/ 1000 - newFrameSyncDelaySeconds;
-    var pivot = _frames.length - newFrameSyncDelaySeconds * _framesPerSecond;
-    if (pivot <= 0) {
-      return;
-    }
-
-    // Scan backward
-    var high = pivot;
-    while (high > 0) {
-      var low = high - _framesPerSecond * chunkSizeInSeconds;
-      if (low < 0) {
-        low = 0;
-      }
-      var synced = true;
-      var losses = 0;
-      var chunk = _frames.sublist(low, high);
-      for (var f in chunk) {
-        var head = f.sublist(0, 3);
-        var seq = Uint8List.fromList(head..add(0)).buffer.asByteData().getInt32(0);
-        if (!_syncFrameSeq.contains(seq)) {
-          losses++;
-          if (losses >= lossesThreshold) {
-            synced = false;
-            break;
+    try {
+      final io.Directory? dir = await _ensureWalsDir();
+      if (dir == null) return [];
+      final List<io.FileSystemEntity> entities = await dir.list().toList();
+      final List<Wal> wals = [];
+      for (io.FileSystemEntity entity in entities) {
+        if (entity is io.File && entity.path.endsWith('.json')) {
+          try {
+            final String content = await entity.readAsString();
+            final Map<String, dynamic> jsonMap = jsonDecode(content);
+            wals.add(Wal.fromJson(jsonMap));
+          } catch (e) {
+            debugPrint("Error reading or parsing WAL json file: ${entity.path}, error: $e");
           }
         }
       }
-      var timerStart = timerEnd - (high - low) ~/ _framesPerSecond;
-      if (!synced) {
-        var missWalIdx =
-            _wals.indexWhere((w) => w.timerStart == timerStart && w.device == "phone" && w.codec == _codec);
-        Wal missWal;
-        if (missWalIdx < 0) {
-          missWal = Wal(
-            codec: _codec,
-            timerStart: timerStart,
-            data: chunk,
-            storage: WalStorage.mem,
-            status: WalStatus.miss,
-          );
-          _wals.add(missWal);
-        } else {
-          missWal = _wals[missWalIdx];
-          missWal.data.addAll(chunk);
-          missWal.storage = WalStorage.mem;
-          missWal.status = WalStatus.miss;
-          _wals[missWalIdx] = missWal;
-        }
-
-        // send
-        listener.onMissingWalUpdated();
-      }
-
-      // next
-      timerEnd -= chunkSizeInSeconds;
-      high = low;
+      return wals;
+    } catch (e) {
+      debugPrint("Error listing WALs from disk: $e");
+      return [];
     }
-
-    debugPrint("_chunk wals ${_wals.length}");
-
-    // clean
-    _frames.removeRange(0, pivot);
   }
 
-  Future _flush() async {
-    // Storage file
-    for (var i = 0; i < _wals.length; i++) {
-      final wal = _wals[i];
-
-      if (wal.storage == WalStorage.mem) {
-        final directory = await getApplicationDocumentsDirectory();
-        String filePath = '${directory.path}/${wal.getFileName()}';
-        List<int> data = [];
-        for (int i = 0; i < wal.data.length; i++) {
-          var frame = wal.data[i].sublist(3);
-
-          // Format: <length>|<data> ; bytes: 4 | n
-          final byteFrame = ByteData(frame.length);
-          for (int i = 0; i < frame.length; i++) {
-            byteFrame.setUint8(i, frame[i]);
-          }
-          data.addAll(Uint32List.fromList([frame.length]).buffer.asUint8List());
-          data.addAll(byteFrame.buffer.asUint8List());
-        }
-        final file = File(filePath);
-        await file.writeAsBytes(data);
-        wal.filePath = filePath;
-        wal.storage = WalStorage.disk;
-
-        debugPrint("_flush file ${wal.filePath}");
-
-        _wals[i] = wal;
-      }
+  Future<void> _writeWalToDisk(Wal wal) async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync._writeWalToDisk: Not supported on web. No-op.");
+      return;
     }
-
-    // Clean synced wal
-    for (var i = _wals.length - 1; i >= 0; i--) {
-      if (_wals[i].status == WalStatus.synced) {
-        await _deleteWal(_wals[i]);
-      }
+    try {
+      final io.Directory? dir = await _ensureWalsDir();
+      if (dir == null) return;
+      final io.File file = io.File('${dir.path}/${wal.getFileName().replaceAll('.bin', '.json')}');
+      await file.writeAsBytes(utf8.encode(jsonEncode(wal.toJson())));
+    } catch (e) {
+      debugPrint("Error writing WAL to disk: $e");
     }
-
-    SharedPreferencesUtil().wals = _wals;
   }
 
-  Future<bool> _deleteWal(Wal wal) async {
-    if (wal.filePath != null && wal.filePath!.isNotEmpty) {
-      try {
-        final file = File(wal.filePath!);
-        if (file.existsSync()) {
-          await file.delete();
+  Future<io.File?> _readWalFile(Wal wal) async {
+    if (kIsWeb || wal.filePath == null) {
+      debugPrint("DiskWalSync._readWalFile (audio): Not supported on web or filePath is null. Returning null.");
+      return null;
+    }
+    try {
+      final io.File file = io.File(wal.filePath!);
+      if (await file.exists()) {
+        return file;
+      }
+    } catch (e) {
+      debugPrint("Error reading WAL audio file from disk: $e");
+    }
+    return null;
+  }
+
+  @override
+  Future<void> deleteWal(Wal wal) async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync.deleteWal: Not supported on web. No-op.");
+      _wals.removeWhere((w) => w.id == wal.id);
+      listener.onMissingWalUpdated();
+      return;
+    }
+    try {
+      _wals.removeWhere((w) => w.id == wal.id);
+      final io.Directory? dir = await _ensureWalsDir();
+      if (dir == null) return;
+
+      final io.File jsonFile = io.File('${dir.path}/${wal.getFileName().replaceAll('.bin', '.json')}');
+      if (await jsonFile.exists()) {
+        await jsonFile.delete();
+      }
+      if (wal.filePath != null) {
+        final io.File audioFile = io.File(wal.filePath!);
+        if (await audioFile.exists()) {
+          await audioFile.delete();
         }
-      } catch (e) {
-        debugPrint(e.toString());
-        return false;
+      }
+      listener.onMissingWalUpdated();
+    } catch (e) {
+      debugPrint("Error deleting WAL from disk: $e");
+    }
+  }
+
+  @override
+  Future<List<Wal>> getMissingWals() async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync.getMissingWals: Not supported on web. Returning empty list.");
+      return [];
+    }
+    if (_wals.where((w)=> w.storage == WalStorage.disk).isEmpty){
+        await start();
+    }
+    return _wals.where((wal) => wal.status == WalStatus.miss && wal.storage == WalStorage.disk).toList();
+  }
+
+  @override
+  Future<SyncLocalFilesResponse?> syncAll({IWalSyncProgressListener? progress}) async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync.syncAll: Not supported on web.");
+      return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    }
+    var walsToSync = await getMissingWals();
+    if (walsToSync.isEmpty) return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+
+    List<io.File> filesToSync = [];
+    for (var wal in walsToSync) {
+      if (wal.filePath != null) {
+        io.File file = io.File(wal.filePath!); 
+        if (await file.exists()) {
+          filesToSync.add(file);
+        }
+      } else {
+        debugPrint("Wal missing filePath in syncAll: ${wal.id}");
       }
     }
+    if (filesToSync.isEmpty) {
+      debugPrint("No existing files found on disk to sync in syncAll.");
+      return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    }
 
-    _wals.removeWhere((w) => w.id == wal.id);
-    return true;
+    var response = await syncLocalFiles(filesToSync);
+
+    if (response != null) {
+      for (var wal in walsToSync) {
+        if (filesToSync.any((f) => f.path == wal.filePath)) {
+          wal.status = WalStatus.synced;
+          await _writeWalToDisk(wal); 
+          listener.onWalSynced(wal);
+        }
+      }
+    }
+    return response;
   }
+
+  @override
+  Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress}) async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync.syncWal: Not supported on web.");
+      return null;
+    }
+    if (wal.storage != WalStorage.disk) {
+      debugPrint("DiskWalSync.syncWal called for a non-disk WAL: ${wal.id}, storage: ${wal.storage}");
+      return null;
+    }
+    if (wal.filePath == null) {
+      debugPrint("Wal has no filePath to sync: ${wal.id}");
+      wal.status = WalStatus.corrupted;
+      await _writeWalToDisk(wal);
+      listener.onMissingWalUpdated();
+      return null;
+    }
+
+    io.File fileToSync = io.File(wal.filePath!); 
+    if (!await fileToSync.exists()) {
+      debugPrint("Wal file does not exist at path: ${wal.filePath}");
+      wal.status = WalStatus.corrupted;
+      await _writeWalToDisk(wal);
+      listener.onMissingWalUpdated();
+      return null;
+    }
+
+    var response = await syncLocalFiles([fileToSync]);
+
+    if (response != null) {
+      wal.status = WalStatus.synced;
+      await _writeWalToDisk(wal);
+      listener.onWalSynced(wal);
+    }
+    return response;
+  }
+
+  @override
+  Future<void> start() async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync.start: Not supported on web. Wals will be empty.");
+      _wals = [];
+      listener.onMissingWalUpdated();
+      return;
+    }
+    _wals = await _readWalsFromDisk();
+    listener.onMissingWalUpdated();
+  }
+
+  @override
+  Future<void> stop() async {
+    _timer?.cancel(); 
+  }
+
+  Future<Wal?> saveWalData(String deviceId, BleAudioCodec codec, int timerStart, List<List<int>> data) async {
+    if (kIsWeb) {
+      debugPrint("DiskWalSync.saveWalData: Not supported on web. Returning null.");
+      return null;
+    }
+    try {
+      final io.Directory? dir = await _ensureWalsDir();
+      if (dir == null) return null;
+
+      final wal = Wal(
+        timerStart: timerStart,
+        codec: codec,
+        storage: WalStorage.disk,
+        device: deviceId,
+        data: data,
+      );
+      wal.filePath = '${dir.path}/${wal.getFileName()}';
+
+      final io.File audioFile = io.File(wal.filePath!);
+      List<int> flatData = data.expand((x) => x).toList();
+      await audioFile.writeAsBytes(Uint8List.fromList(flatData), flush: true);
+
+      wal.status = WalStatus.miss;
+      await _writeWalToDisk(wal);
+
+      _wals.removeWhere((w) => w.id == wal.id);
+      _wals.add(wal);
+      listener.onMissingWalUpdated();
+      return wal;
+    } catch (e) {
+      debugPrint("Error saving WAL data to disk: $e");
+      return null;
+    }
+  }
+}
+
+class MemWalSync implements IWalSync {
+  List<Wal> _wals = [];
+  Timer? _timer;
+  final IWalSyncListener listener;
+  Map<String, List<List<int>>> pcmBuffers = {};
+  final int flushInterval = flushIntervalInSeconds;
+
+  MemWalSync(this.listener);
 
   @override
   Future deleteWal(Wal wal) async {
-    await _deleteWal(wal);
+    _wals.removeWhere((w) => w.id == wal.id);
+    pcmBuffers.remove(wal.id);
     listener.onMissingWalUpdated();
   }
 
   @override
   Future<List<Wal>> getMissingWals() async {
-    return _wals.where((w) => w.status == WalStatus.miss).toList();
+    return _wals.where((wal) => wal.status == WalStatus.miss && wal.storage == WalStorage.mem).toList();
   }
 
-  void onByteStream(List<int> value) async {
-    _frames.add(value);
+  @override
+  Future<void> start() async {
+    _timer?.cancel();
+    _timer = Timer.periodic(Duration(seconds: flushInterval), (timer) async {
+      await flush();
+    });
   }
 
-  void onBytesSync(List<int> value) {
-    var head = value.sublist(0, 3);
-    var seq = Uint8List.fromList(head..add(0)).buffer.asByteData().getInt32(0);
-    _syncFrameSeq.add(seq);
+  Future flush() async {
+    var updated = false;
+    for (var wal in _wals) {
+      if (wal.status == WalStatus.inProgress && DateTime.now().millisecondsSinceEpoch ~/ 1000 - wal.timerStart > chunkSizeInSeconds) {
+        wal.status = WalStatus.miss;
+        updated = true;
+      }
+    }
+    if (updated) {
+      listener.onMissingWalUpdated();
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    await flush();
+    _timer?.cancel();
   }
 
   @override
   Future<SyncLocalFilesResponse?> syncAll({IWalSyncProgressListener? progress}) async {
-    await _flush();
+    List<Wal> walsToSync = await getMissingWals();
+    if (walsToSync.isEmpty) return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
 
-    var wals = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.disk).toList();
-    if (wals.isEmpty) {
-      debugPrint("All synced!");
+    List<String> allNewIds = [];
+    List<String> allUpdatedIds = [];
+    double currentProgress = 0;
+    double step = walsToSync.isNotEmpty ? 1.0 / walsToSync.length : 0;
+
+    for (Wal wal in walsToSync) {
+      var response = await syncWal(wal: wal, progress: null);
+      if (response != null) {
+        allNewIds.addAll(response.newConversationIds);
+        allUpdatedIds.addAll(response.updatedConversationIds);
+      }
+      currentProgress += step;
+      progress?.onWalSyncedProgress(currentProgress.clamp(0,1));
+    }
+    return SyncLocalFilesResponse(newConversationIds: allNewIds, updatedConversationIds: allUpdatedIds);
+  }
+
+ @override
+  Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress}) async {
+    if (wal.data.isEmpty) {
+      debugPrint("MemWalSync: Wal has no data to sync: ${wal.id}");
       return null;
     }
 
-    // Empty resp
-    var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    Uint8List bytes;
+    String filename = wal.getFileName().replaceAll('.bin', '.wav');
+    io.File? tempFileForMobile;
 
-    var steps = 10;
-    for (var i = wals.length - 1; i >= 0; i -= steps) {
-      var right = i;
-      var left = right - steps;
-      if (left < 0) {
-        left = 0;
+    try {
+      List<int> flatData = wal.data.expand((x) => x).toList();
+      bytes = WavBytesUtil.getUInt8ListBytes(flatData, wal.sampleRate, 1, 16);
+
+      SyncLocalFilesResponse? response;
+      if (kIsWeb) {
+        debugPrint("MemWalSync.syncWal (Web): Attempting to sync ${bytes.lengthInBytes} bytes for ${wal.id}.");
+        response = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+      } else {
+        final tempDir = await path_provider_aliased.getTemporaryDirectory();
+        tempFileForMobile = io.File('${tempDir.path}/$filename');
+        await tempFileForMobile.writeAsBytes(bytes);
+        
+        response = await syncLocalFiles([tempFileForMobile]);
       }
 
-      List<File> files = [];
-      for (var j = left; j <= right; j++) {
-        var wal = wals[j];
-        debugPrint("sync id ${wal.id} ${wal.timerStart}");
-        if (wal.filePath == null) {
-          debugPrint("file path is not found. wal id ${wal.id}");
-          wal.status = WalStatus.corrupted;
-          continue;
-        }
-
-        debugPrint("sync wal: ${wal.id} file: ${wal.filePath}");
-
-        try {
-          File file = File(wal.filePath!);
-          if (!file.existsSync()) {
-            debugPrint("file ${wal.filePath} is not exists");
-            wal.status = WalStatus.corrupted;
-            continue;
-          }
-          files.add(file);
-          wal.isSyncing = true;
-        } catch (e) {
-          wal.status = WalStatus.corrupted;
-          debugPrint(e.toString());
-        }
-      }
-
-      if (files.isEmpty) {
-        debugPrint("Files are empty");
-        continue;
-      }
-
-      // Progress
-      progress?.onWalSyncedProgress((left).toDouble() / wals.length);
-
-      // Sync
-      listener.onMissingWalUpdated();
-      try {
-        var partialRes = await syncLocalFiles(files);
-
-        // Ensure unique
-        resp.newConversationIds
-            .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-        resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-            .where((id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id)));
-      } catch (e) {
-        debugPrint(e.toString());
-        continue;
-      }
-
-      // Success? update status to synced
-      for (var j = left; j < right; j++) {
-        var wal = wals[j];
-        wals[j].status = WalStatus.synced; // ref to _wals[]
-
-        // Send
+      if (response != null) {
+        wal.status = WalStatus.synced;
         listener.onWalSynced(wal);
       }
-
-      SharedPreferencesUtil().wals = _wals;
+      return response;
+    } catch (e) {
+      debugPrint("Error in MemWalSync.syncWal for ${wal.id}: $e");
+      wal.status = WalStatus.corrupted;
       listener.onMissingWalUpdated();
+      return null;
+    } finally {
+      if (!kIsWeb && tempFileForMobile != null && await tempFileForMobile.exists()) {
+        try {
+          await tempFileForMobile.delete();
+        } catch (e) {
+          debugPrint("Error deleting temp file for MemWalSync: $e");
+        }
+      }
     }
-
-    // Progress
-    progress?.onWalSyncedProgress(1.0);
-    return resp;
   }
 
-  @override
-  Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress}) async {
-    await _flush();
 
-    var walToSync = _wals.where((w) => w == wal).toList().first;
-
-    // Empty resp
-    var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
-
-    late File walFile;
-    if (wal.filePath == null) {
-      debugPrint("file path is not found. wal id ${wal.id}");
-      wal.status = WalStatus.corrupted;
+  Wal getInProgressWal(String deviceId, BleAudioCodec codec, int timerStart) {
+    var wal = _wals.firstWhereOrNull((w) => w.timerStart == timerStart && w.device == deviceId);
+    if (wal == null) {
+      wal = Wal(timerStart: timerStart, codec: codec, device: deviceId, storage: WalStorage.mem);
+      _wals.add(wal);
     }
-    try {
-      File file = File(wal.filePath!);
-      if (!file.existsSync()) {
-        debugPrint("file ${wal.filePath} is not exists");
-        wal.status = WalStatus.corrupted;
-      } else {
-        walFile = file;
-        wal.isSyncing = true;
-      }
-    } catch (e) {
-      wal.status = WalStatus.corrupted;
-      debugPrint(e.toString());
+    return wal;
+  }
+
+  List<List<int>> getPcmBuffer(String id) {
+    if (!pcmBuffers.containsKey(id)) {
+      pcmBuffers[id] = [];
     }
+    return pcmBuffers[id]!;
+  }
 
-    // Sync
-    listener.onMissingWalUpdated();
-    try {
-      var partialRes = await syncLocalFiles([walFile]);
-
-      // Ensure unique
-      resp.newConversationIds
-          .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-      resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-          .where((id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id)));
-    } catch (e) {
-      debugPrint(e.toString());
-    }
-
-    walToSync.status = WalStatus.synced; // ref to _wals[]
-
-    // Send
-    listener.onWalSynced(wal);
-
-    SharedPreferencesUtil().wals = _wals;
-    listener.onMissingWalUpdated();
-
-    progress?.onWalSyncedProgress(1.0);
-    return resp;
+  void storeFramePacket(String deviceId, BleAudioCodec codec, int timerStart, List<int> frame) {
+    Wal wal = getInProgressWal(deviceId, codec, timerStart);
+    if (wal.status == WalStatus.synced) return;
+    wal.data.add(frame);
   }
 }
 
-class WalSyncs implements IWalSync {
-  late LocalWalSync _phoneSync;
-  LocalWalSync get phone => _phoneSync;
+class SharedPreferencesWalStorage {
+  static const _walsKey = 'wals_shared_preferences';
 
-  late SDCardWalSync _sdcardSync;
-  SDCardWalSync get sdcard => _sdcardSync;
-
-  IWalSyncListener listener;
-
-  WalSyncs(this.listener) {
-    _phoneSync = LocalWalSync(listener);
-    _sdcardSync = SDCardWalSync(listener);
-  }
-
-  @override
-  Future deleteWal(Wal wal) async {
-    await _phoneSync.deleteWal(wal);
-    await _sdcardSync.deleteWal(wal);
-  }
-
-  @override
-  Future<List<Wal>> getMissingWals() async {
-    List<Wal> wals = [];
-    wals.addAll(await _sdcardSync.getMissingWals());
-    wals.addAll(await _phoneSync.getMissingWals());
-    return wals;
-  }
-
-  @override
-  void start() {
-    _phoneSync.start();
-    _sdcardSync.start();
-  }
-
-  @override
-  Future stop() async {
-    await _phoneSync.stop();
-    await _sdcardSync.stop();
-  }
-
-  @override
-  Future<SyncLocalFilesResponse?> syncAll({IWalSyncProgressListener? progress}) async {
-    var resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
-
-    // sdcard
-    var partialRes = await _sdcardSync.syncAll(progress: progress);
-    if (partialRes != null) {
-      resp.newConversationIds
-          .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-      resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-          .where((id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id)));
+  Future<List<Wal>> loadWals() async {
+    if (kIsWeb) {
+      debugPrint("SharedPreferencesWalStorage.loadWals: Not supported on web. Returning empty list.");
+      return [];
     }
-
-    // phone
-    partialRes = await _phoneSync.syncAll(progress: progress);
-    if (partialRes != null) {
-      resp.newConversationIds
-          .addAll(partialRes.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-      resp.updatedConversationIds.addAll(partialRes.updatedConversationIds
-          .where((id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id)));
-    }
-
-    return resp;
-  }
-
-  @override
-  Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress}) {
-    if (wal.storage == WalStorage.sdcard) {
-      return _sdcardSync.syncWal(wal: wal, progress: progress);
-    } else {
-      return _phoneSync.syncWal(wal: wal, progress: progress);
+    try {
+      final String? walsJsonString = SharedPreferencesUtil().getString(_walsKey);
+      if (walsJsonString != null) {
+        final List<dynamic> decodedList = jsonDecode(walsJsonString);
+        List<Wal> loadedWals = Wal.fromJsonList(decodedList);
+        return loadedWals;
+      } else {
+        return [];
+      }
+    } catch (e) {
+      debugPrint("Error loading WALs from SharedPreferences: $e");
+      return [];
     }
   }
+
+  Future<void> saveWals(List<Wal> wals) async {
+    if (kIsWeb) {
+      debugPrint("SharedPreferencesWalStorage.saveWals: Not supported on web. No-op.");
+      return;
+    }
+    try {
+      final String walsJsonString = jsonEncode(wals.map((wal) => wal.toJson()).toList());
+      SharedPreferencesUtil().saveString(_walsKey, walsJsonString);
+    } catch (e) {
+      debugPrint("Error saving WALs to SharedPreferences: $e");
+    }
+  }
+
+  Future<void> clearWals() async {
+    if (kIsWeb) {
+      debugPrint("SharedPreferencesWalStorage.clearWals: Not supported on web. No-op.");
+      return;
+    }
+    SharedPreferencesUtil().remove(_walsKey);
+  }
+}
+
+class WalSyncs {
+  final MemWalSync mem;
+  final DiskWalSync disk;
+  final SDCardWalSync sdcard;
+
+  WalSyncs(IWalSyncListener listener)
+      : mem = MemWalSync(listener),
+        disk = DiskWalSync(listener),
+        sdcard = SDCardWalSync(listener);
+
+  List<IWalSync> get all => [mem, disk, sdcard];
 }
 
 class WalService implements IWalService, IWalSyncListener {
-  final Map<Object, IWalServiceListener> _subscriptions = {};
+  final List<Pair<IWalServiceListener, Object>> _subscriptions = [];
   WalServiceStatus _status = WalServiceStatus.init;
-  WalServiceStatus get status => _status;
-
+  final SharedPreferencesWalStorage _storage = SharedPreferencesWalStorage();
   late WalSyncs _syncs;
-  WalSyncs get syncs => _syncs;
+  List<Wal> _wals = [];
 
   WalService() {
     _syncs = WalSyncs(this);
   }
 
+  WalServiceStatus get status => _status;
+
+  @override
+  void onMissingWalUpdated() async {
+    _wals = await _storage.loadWals();
+    await _updateWals();
+    for (var sub in _subscriptions) {
+      sub.first.onMissingWalUpdated();
+    }
+  }
+
+  @override
+  void onWalSynced(Wal wal, {ServerConversation? conversation}) async {
+    _updateWalStatus(wal, WalStatus.synced);
+    await _storage.saveWals(_wals);
+    for (var sub in _subscriptions) {
+      sub.first.onWalSynced(wal, conversation: conversation);
+    }
+  }
+
+  @override
+  Future<void> start() async {
+    _wals = await _storage.loadWals();
+    for (final IWalSync syncService in _syncs.all) {
+      await syncService.start();
+    }
+    _updateWals();
+    _status = WalServiceStatus.ready;
+    for (var sub in _subscriptions) {
+      sub.first.onStatusChanged(_status);
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    for (var sync in _syncs.all) {
+      await sync.stop();
+    }
+    _status = WalServiceStatus.stop;
+    for (var sub in _subscriptions) {
+      sub.first.onStatusChanged(_status);
+    }
+  }
+
   @override
   void subscribe(IWalServiceListener subscription, Object context) {
-    _subscriptions.remove(context.hashCode);
-    _subscriptions.putIfAbsent(context.hashCode, () => subscription);
-
-    // retains
-    subscription.onStatusChanged(_status);
+    _subscriptions.add(Pair(subscription, context));
   }
 
   @override
   void unsubscribe(Object context) {
-    _subscriptions.remove(context.hashCode);
+    _subscriptions.removeWhere((pair) => pair.last == context);
   }
 
-  @override
-  void start() {
-    _syncs.start();
-    _status = WalServiceStatus.ready;
+  Future<void> _updateWals() async {
+    for (var sync in _syncs.all) {
+      var missingWals = await sync.getMissingWals();
+      for (var missingWal in missingWals) {
+        if (_wals.firstWhereOrNull((w) => w.id == missingWal.id) == null) {
+          _wals.add(missingWal);
+        }
+      }
+    }
+    await _storage.saveWals(_wals);
   }
 
-  @override
-  Future stop() async {
-    await _syncs.stop();
-
-    _status = WalServiceStatus.stop;
-    _onStatusChanged(_status);
-    _subscriptions.clear();
-  }
-
-  void _onStatusChanged(WalServiceStatus status) {
-    for (var s in _subscriptions.values) {
-      s.onStatusChanged(status);
+  void _updateWalStatus(Wal wal, WalStatus status) {
+    var existingWal = _wals.firstWhereOrNull((w) => w.id == wal.id);
+    if (existingWal != null) {
+      existingWal.status = status;
     }
   }
 
   @override
-  WalSyncs getSyncs() {
-    return _syncs;
-  }
-
-  @override
-  void onMissingWalUpdated() {
-    for (var s in _subscriptions.values) {
-      s.onMissingWalUpdated();
-    }
-  }
-
-  @override
-  void onWalSynced(Wal wal, {ServerConversation? conversation}) {
-    for (var s in _subscriptions.values) {
-      s.onWalSynced(wal, conversation: conversation);
-    }
-  }
+  WalSyncs getSyncs() => _syncs;
 }

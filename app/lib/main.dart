@@ -14,8 +14,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/dev_env.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/env/prod_env.dart';
-import 'package:omi/firebase_options_dev.dart' as dev;
-import 'package:omi/firebase_options_prod.dart' as prod;
+import 'package:omi/firebase_options.dart';
 import 'package:omi/flavors.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/apps/providers/add_app_provider.dart';
@@ -53,17 +52,15 @@ import 'package:provider/provider.dart';
 import 'package:talker_flutter/talker_flutter.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/debugging/instabug_manager.dart';
+import 'package:flutter/foundation.dart';
+import 'package:omi/utils/platform/platform_service.dart';
 
 Future<bool> _init() async {
   // Service manager
   ServiceManager.init();
 
   // Firebase
-  if (F.env == Environment.prod) {
-    await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform, name: 'prod');
-  } else {
-    await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform, name: 'dev');
-  }
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   await PlatformManager.initializeServices();
   await NotificationService.instance.initialize();
@@ -74,11 +71,25 @@ Future<bool> _init() async {
 
   bool isAuth = (await getIdToken()) != null;
   if (isAuth) PlatformManager.instance.mixpanel.identify();
-  if (!Platform.isMacOS) initOpus(await opus_flutter.load());
+
+  // Load opus library. opus_flutter handles platform-specific loading (WASM for web, dylib for mobile).
+  // initOpus from opus_dart is then called for mobile to point to the loaded dylib.
+  // For web, opus_dart should automatically find/use the WASM module loaded by opus_flutter.load().
+  final opusLibrary = await opus_flutter.load();
+  // Call initOpus for all platforms, including web, as per opus_dart documentation.
+  // opus_flutter.load() provides the correct DynamicLibrary for the current platform (native or WASM).
+  initOpus(opusLibrary);
+  // if (!kIsWeb && !Platform.isMacOS) {
+  //   initOpus(opusLibrary); 
+  // }
+  // For kIsWeb, opus_dart should pick up the WASM loaded by opus_flutter.load() without needing initOpus.
+  // For Platform.isMacOS (and not web), the original code didn't call initOpus. We maintain that.
 
   await GrowthbookUtil.init();
   CalendarUtil.init();
-  ble.FlutterBluePlus.setLogLevel(ble.LogLevel.info, color: true);
+  if (!kIsWeb) {
+    ble.FlutterBluePlus.setLogLevel(ble.LogLevel.info, color: true);
+  }
   return isAuth;
 }
 
@@ -97,7 +108,9 @@ void main() async {
   } else {
     Env.init(DevEnv());
   }
-  FlutterForegroundTask.initCommunicationPort();
+  if (!kIsWeb) {
+    FlutterForegroundTask.initCommunicationPort();
+  }
   if (Env.posthogApiKey != null) {
     await initPostHog();
   }
@@ -311,7 +324,7 @@ class _DeciderWidgetState extends State<DeciderWidget> {
   }
 
   void openAppLink(Uri uri) async {
-    if (uri.pathSegments.first == 'apps') {
+    if (uri.pathSegments.isNotEmpty && uri.pathSegments.first == 'apps') {
       if (mounted) {
         var app = await context.read<AppProvider>().getAppFromId(uri.pathSegments[1]);
         if (app != null) {
@@ -352,11 +365,13 @@ class _DeciderWidgetState extends State<DeciderWidget> {
         context.read<AppProvider>().setAppsFromCache();
         context.read<MessageProvider>().refreshMessages();
       } else {
-        if (!PlatformManager.instance.isMacOS) {
+        if (PlatformService.isIntercomSupported && !PlatformManager.instance.isMacOS) {
           await PlatformManager.instance.intercom.intercom.loginUnidentifiedUser();
         }
       }
-      PlatformManager.instance.intercom.setUserAttributes();
+      if (PlatformService.isIntercomSupported) {
+        PlatformManager.instance.intercom.setUserAttributes();
+      }
     });
     super.initState();
   }

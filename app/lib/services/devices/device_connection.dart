@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/devices.dart';
@@ -82,7 +84,7 @@ abstract class DeviceConnection {
     }
 
     // Mtu
-    if (Platform.isAndroid && bleDevice.mtuNow < 512) {
+    if (!kIsWeb && Platform.isAndroid && bleDevice.mtuNow < 512) {
       await bleDevice.requestMtu(512); // This might fix the code 133 error
     }
 

@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:developer';
-import 'dart:io';
+import 'dart:io' if (dart.library.html) 'package:omi/utils/stubs/dart_io_web.dart';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -11,7 +13,8 @@ import 'package:omi/env/env.dart';
 import 'package:http/http.dart' as http;
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
-import 'package:path/path.dart';
+import 'package:path/path.dart' as p;
+import 'package:omi/utils/app_file.dart';
 
 Future<List<App>> retrieveApps() async {
   var response = await makeApiCall(
@@ -99,13 +102,20 @@ Future<bool> reviewApp(String appId, AppReview review) async {
   }
 }
 
-Future<Map<String, String>> uploadAppThumbnail(File file) async {
+Future<Map<String, String>> uploadAppThumbnail(AppFile appFile) async {
   var request = http.MultipartRequest(
     'POST',
     Uri.parse('${Env.apiBaseUrl}v1/app/thumbnails'),
   );
-  request.files.add(await http.MultipartFile.fromPath('file', file.path, filename: basename(file.path)));
   request.headers.addAll({'Authorization': await getAuthHeader()});
+
+  if (kIsWeb) {
+    final bytes = await appFile.readAsBytes();
+    request.files.add(http.MultipartFile.fromBytes('file', bytes, filename: appFile.name));
+  } else {
+    if (appFile.path == null) throw Exception("File path is null for mobile upload");
+    request.files.add(await http.MultipartFile.fromPath('file', appFile.path!, filename: appFile.name));
+  }
 
   try {
     var streamedResponse = await request.send();
@@ -209,14 +219,21 @@ Future<bool> isAppSetupCompleted(String? url) async {
   }
 }
 
-Future<(bool, String, String?)> submitAppServer(File file, Map<String, dynamic> appData) async {
+Future<(bool, String, String?)> submitAppServer(AppFile appFile, Map<String, dynamic> appData) async {
   var request = http.MultipartRequest(
     'POST',
     Uri.parse('${Env.apiBaseUrl}v1/apps'),
   );
-  request.files.add(await http.MultipartFile.fromPath('file', file.path, filename: basename(file.path)));
   request.headers.addAll({'Authorization': await getAuthHeader()});
   request.fields.addAll({'app_data': jsonEncode(appData)});
+
+  if (kIsWeb) {
+    final bytes = await appFile.readAsBytes();
+    request.files.add(http.MultipartFile.fromBytes('file', bytes, filename: appFile.name));
+  } else {
+    if (appFile.path == null) throw Exception("File path is null for mobile submission");
+    request.files.add(await http.MultipartFile.fromPath('file', appFile.path!, filename: appFile.name));
+  }
   debugPrint(jsonEncode(appData));
   try {
     var streamedResponse = await request.send();
@@ -245,23 +262,30 @@ Future<(bool, String, String?)> submitAppServer(File file, Map<String, dynamic> 
   }
 }
 
-Future<bool> updateAppServer(File? file, Map<String, dynamic> appData) async {
+Future<bool> updateAppServer(AppFile? appFile, Map<String, dynamic> appData, String appId) async {
   var request = http.MultipartRequest(
     'PATCH',
-    Uri.parse('${Env.apiBaseUrl}v1/apps/${appData['id']}'),
+    Uri.parse('${Env.apiBaseUrl}v1/apps/$appId'),
   );
-  if (file != null) {
-    request.files.add(await http.MultipartFile.fromPath('file', file.path, filename: basename(file.path)));
-  }
   request.headers.addAll({'Authorization': await getAuthHeader()});
   request.fields.addAll({'app_data': jsonEncode(appData)});
+
+  if (appFile != null) {
+    if (kIsWeb) {
+      final bytes = await appFile.readAsBytes();
+      request.files.add(http.MultipartFile.fromBytes('file', bytes, filename: appFile.name));
+    } else {
+      if (appFile.path == null) throw Exception("File path is null for mobile update");
+      request.files.add(await http.MultipartFile.fromPath('file', appFile.path!, filename: appFile.name));
+    }
+  }
   debugPrint(jsonEncode(appData));
   try {
     var streamedResponse = await request.send();
     var response = await http.Response.fromStream(streamedResponse);
 
     if (response.statusCode == 200) {
-      debugPrint('updateAppServer Response body: ${jsonDecode(response.body)}');
+      debugPrint('updateAppServer Response body: ${response.body}');
       return true;
     } else {
       debugPrint('Failed to update app. Status code: ${response.statusCode}');
@@ -420,7 +444,6 @@ Future<String> getGenratedDescription(String name, String description) async {
   }
 }
 
-// API Keys
 Future<List<AppApiKey>> listApiKeysServer(String appId) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/apps/$appId/keys',
@@ -479,14 +502,21 @@ Future<bool> deleteApiKeyServer(String appId, String keyId) async {
   }
 }
 
-Future<Map> createPersonaApp(File file, Map<String, dynamic> personaData) async {
+Future<Map> createPersonaApp(AppFile appFile, Map<String, dynamic> personaData) async {
   var request = http.MultipartRequest(
     'POST',
     Uri.parse('${Env.apiBaseUrl}v1/personas'),
   );
-  request.files.add(await http.MultipartFile.fromPath('file', file.path, filename: basename(file.path)));
   request.headers.addAll({'Authorization': await getAuthHeader()});
   request.fields.addAll({'persona_data': jsonEncode(personaData)});
+
+  if (kIsWeb) {
+    final bytes = await appFile.readAsBytes();
+    request.files.add(http.MultipartFile.fromBytes('file', bytes, filename: appFile.name));
+  } else {
+    if (appFile.path == null) throw Exception("File path is null for mobile persona creation");
+    request.files.add(await http.MultipartFile.fromPath('file', appFile.path!, filename: appFile.name));
+  }
   print(jsonEncode(personaData));
   try {
     var streamedResponse = await request.send();
@@ -505,16 +535,23 @@ Future<Map> createPersonaApp(File file, Map<String, dynamic> personaData) async 
   }
 }
 
-Future<bool> updatePersonaApp(File? file, Map<String, dynamic> personaData) async {
+Future<bool> updatePersonaApp(AppFile? appFile, Map<String, dynamic> personaData) async {
   var request = http.MultipartRequest(
     'PATCH',
     Uri.parse('${Env.apiBaseUrl}v1/personas/${personaData['id']}'),
   );
-  if (file != null) {
-    request.files.add(await http.MultipartFile.fromPath('file', file.path, filename: basename(file.path)));
-  }
   request.headers.addAll({'Authorization': await getAuthHeader()});
   request.fields.addAll({'persona_data': jsonEncode(personaData)});
+
+  if (appFile != null) {
+    if (kIsWeb) {
+      final bytes = await appFile.readAsBytes();
+      request.files.add(http.MultipartFile.fromBytes('file', bytes, filename: appFile.name));
+    } else {
+      if (appFile.path == null) throw Exception("File path is null for mobile persona update");
+      request.files.add(await http.MultipartFile.fromPath('file', appFile.path!, filename: appFile.name));
+    }
+  }
   debugPrint(jsonEncode(personaData));
   try {
     var streamedResponse = await request.send();
@@ -685,4 +722,40 @@ Future<Map<String, dynamic>?> getUpsertUserPersonaServer() async {
     PlatformManager.instance.instabug.reportCrash(e, stackTrace);
     return null;
   }
+}
+
+Future<(App?, String?)> createAppFromStore(String storeUrl, {bool makePublic = false}) async {
+  var url = Uri.parse(storeUrl);
+  if (url.host.contains('apps.apple.com')) {
+    var response = await makeApiCall(
+      url: '${Env.apiBaseUrl}v1/apps/create/appstore?url=${Uri.encodeComponent(storeUrl)}&make_public=$makePublic',
+      headers: {},
+      body: '',
+      method: 'POST',
+    );
+    if (response != null && response.statusCode == 200) {
+      var data = jsonDecode(response.body);
+      return (App.fromJson(data), null);
+    } else if (response != null) {
+      var data = jsonDecode(response.body);
+      return (null, data['error'] as String? ?? 'Failed to create app from App Store link.');
+    }
+    return (null, 'Failed to communicate with server for App Store link.');
+  } else if (url.host.contains('play.google.com')) {
+    var response = await makeApiCall(
+      url: '${Env.apiBaseUrl}v1/apps/create/playstore?url=${Uri.encodeComponent(storeUrl)}&make_public=$makePublic',
+      headers: {},
+      body: '',
+      method: 'POST',
+    );
+    if (response != null && response.statusCode == 200) {
+      var data = jsonDecode(response.body);
+      return (App.fromJson(data), null);
+    } else if (response != null) {
+      var data = jsonDecode(response.body);
+      return (null, data['error' ] as String? ?? 'Failed to create app from Play Store link.');
+    }
+    return (null, 'Failed to communicate with server for Play Store link.');
+  }
+  return (null, 'Invalid store URL provided.');
 }

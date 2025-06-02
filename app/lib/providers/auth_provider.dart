@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/backend/auth.dart';
 import 'package:omi/backend/preferences.dart';
@@ -131,7 +132,9 @@ class AuthenticationProvider extends BaseProvider {
   Future<void> linkWithGoogle() async {
     setLoading(true);
     try {
-      final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
+      final GoogleSignInAccount? googleUser = await GoogleSignIn(
+        clientId: kIsWeb ? "387631603513-9842bdocu7uhfvcd8jq84026rsl1j7bd.apps.googleusercontent.com" : null,
+      ).signIn();
       if (googleUser == null) {
         setLoading(false);
         return;

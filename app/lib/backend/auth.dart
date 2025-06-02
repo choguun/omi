@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/utils/logger.dart';
@@ -113,6 +114,7 @@ Future<UserCredential?> signInWithGoogle() async {
     // Trigger the authentication flow
     final GoogleSignInAccount? googleUser = await GoogleSignIn(
       scopes: ['profile', 'email'],
+      clientId: kIsWeb ? "1031333818730-l9meebge7tpc0qmquvq6t5qpoe09o1ra.apps.googleusercontent.com" : null,
     ).signIn();
     debugPrint('Google User: $googleUser');
 

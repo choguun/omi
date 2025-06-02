@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
@@ -25,6 +26,7 @@ import 'package:omi/widgets/extensions/string.dart';
 import 'package:gradient_borders/gradient_borders.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:omi/utils/app_file.dart';
 
 import 'widgets/message_action_menu.dart';
 
@@ -41,8 +43,10 @@ class ChatPage extends StatefulWidget {
 }
 
 class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
-  TextEditingController textController = TextEditingController();
-  late ScrollController scrollController;
+  final TextEditingController textController = TextEditingController();
+  final ScrollController scrollController = ScrollController();
+  final FocusNode focusNode = FocusNode();
+  AppFile? _recordedAudioAppFileForChat;
 
   bool isScrollingDown = false;
 
@@ -59,7 +63,6 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
   @override
   void initState() {
     apps = prefs.appsList;
-    scrollController = ScrollController();
     scrollController.addListener(() {
       if (scrollController.position.userScrollDirection == ScrollDirection.reverse) {
         if (!isScrollingDown) {
@@ -103,6 +106,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final messageProvider = Provider.of<MessageProvider>(context, listen: false);
 
     return Consumer2<MessageProvider, ConnectivityProvider>(
       builder: (context, provider, connectivityProvider, child) {
@@ -181,10 +185,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
                                   double bottomPadding = chatIndex == 0
                                       ? provider.selectedFiles.isNotEmpty
-                                          ? (Platform.isAndroid
+                                          ? (!kIsWeb && Platform.isAndroid
                                               ? MediaQuery.sizeOf(context).height * 0.32
                                               : MediaQuery.sizeOf(context).height * 0.3)
-                                          : (Platform.isAndroid
+                                          : (!kIsWeb && Platform.isAndroid
                                               ? MediaQuery.sizeOf(context).height * 0.21
                                               : MediaQuery.sizeOf(context).height * 0.19)
                                       : 0;
@@ -295,7 +299,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                           ? AIMessage(
                                               showTypingIndicator: provider.showTypingIndicator && chatIndex == 0,
                                               message: message,
-                                              sendMessage: _sendMessageUtil,
+                                              sendMessage: (text) => _sendMessageUtil(text, null, provider),
                                               displayOptions: provider.messages.length <= 1 &&
                                                   provider.messageSenderApp(message.appId)?.isNotPersona() == true,
                                               appSender: provider.messageSenderApp(message.appId),
@@ -372,53 +376,29 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                               width: MediaQuery.sizeOf(context).width * 0.2,
                                               decoration: BoxDecoration(
                                                 color: Colors.grey[800],
-                                                image: provider.selectedFileTypes[idx] == 'image'
-                                                    ? DecorationImage(
-                                                        image: FileImage(provider.selectedFiles[idx]),
-                                                        fit: BoxFit.cover,
-                                                      )
-                                                    : null,
                                                 borderRadius: BorderRadius.circular(10),
                                               ),
-                                              child: Stack(
-                                                children: [
-                                                  provider.selectedFileTypes[idx] != 'image'
-                                                      ? const Center(
-                                                          child: Icon(
-                                                            Icons.insert_drive_file,
-                                                            color: Colors.white,
-                                                            size: 30,
-                                                          ),
-                                                        )
-                                                      : Container(),
-                                                  if (provider.isFileUploading(provider.selectedFiles[idx].path))
-                                                    Container(
-                                                      color: Colors.black.withOpacity(0.5),
-                                                      child: const Center(
-                                                        child: SizedBox(
-                                                          width: 20,
-                                                          height: 20,
-                                                          child: CircularProgressIndicator(
-                                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
-                                                          ),
-                                                        ),
+                                              child: FutureBuilder<Uint8List>(
+                                                future: provider.selectedFiles[idx].readAsBytes(),
+                                                builder: (context, snapshot) {
+                                                  if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+                                                    return ClipRRect(
+                                                      borderRadius: BorderRadius.circular(10),
+                                                      child: Image.memory(snapshot.data!, fit: BoxFit.cover),
+                                                    );
+                                                  } else if (provider.selectedFileTypes[idx] != 'image') {
+                                                    return const Center(
+                                                      child: Icon(
+                                                        Icons.insert_drive_file,
+                                                        color: Colors.white,
+                                                        size: 30,
                                                       ),
-                                                    ),
-                                                  Positioned(
-                                                    top: 4,
-                                                    right: 4,
-                                                    child: GestureDetector(
-                                                      onTap: () {
-                                                        provider.clearSelectedFile(idx);
-                                                      },
-                                                      child: CircleAvatar(
-                                                        radius: 12,
-                                                        backgroundColor: Colors.grey[700],
-                                                        child: const Icon(Icons.close, size: 16, color: Colors.white),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ],
+                                                    );
+                                                  }
+                                                  return provider.isFileUploading(provider.selectedFiles[idx].name) 
+                                                    ? Container()
+                                                    : const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.white70)));
+                                                },
                                               ),
                                             );
                                           },
@@ -499,11 +479,14 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                 Expanded(
                                   child: _showVoiceRecorder
                                       ? VoiceRecorderWidget(
-                                          onTranscriptReady: (transcript) {
+                                          onTranscriptReady: (transcript, audioFile) {
                                             setState(() {
                                               textController.text = transcript;
                                               _showVoiceRecorder = false;
+                                              _recordedAudioAppFileForChat = audioFile;
                                               context.read<MessageProvider>().setNextMessageOriginIsVoice(true);
+                                              if (transcript.isNotEmpty || (transcript.isEmpty && audioFile != null)) {
+                                              }
                                             });
                                           },
                                           onClose: () {
@@ -560,9 +543,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                             ? null
                                             : () {
                                                 String message = textController.text;
-                                                if (message.isEmpty) return;
+                                                if (message.isEmpty && _recordedAudioAppFileForChat == null && provider.selectedFiles.isEmpty) return;
                                                 if (connectivityProvider.isConnected) {
-                                                  _sendMessageUtil(message);
+                                                  _sendMessageUtil(message, _recordedAudioAppFileForChat, provider);
+                                                  _recordedAudioAppFileForChat = null;
                                                 } else {
                                                   ScaffoldMessenger.of(context).showSnackBar(
                                                     const SnackBar(
@@ -603,15 +587,28 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
-  _sendMessageUtil(String text) {
-    var provider = context.read<MessageProvider>();
-    provider.setSendingMessage(true);
-    provider.addMessageLocally(text);
+  _sendMessageUtil(String text, AppFile? audioFile, MessageProvider msgProvider) {
+    msgProvider.setSendingMessage(true);
+    List<AppFile> filesToUpload = [];
+    if (audioFile != null) {
+      filesToUpload.add(audioFile);
+    }
+    filesToUpload.addAll(msgProvider.selectedFiles.where((sf) => sf != audioFile));
+
+    msgProvider.addMessageLocally(text, audioFile: audioFile);
     scrollToBottom();
     textController.clear();
-    provider.sendMessageStreamToServer(text);
-    provider.clearSelectedFiles();
-    provider.setSendingMessage(false);
+
+    bool isVoiceMessage = audioFile != null;
+    if (isVoiceMessage && audioFile != null) {
+        msgProvider.sendMessageStreamToServer(text, audioFile: audioFile);
+    } else {
+        msgProvider.sendMessageStreamToServer(text);
+    }
+    
+    msgProvider.clearSelectedFiles();
+    _recordedAudioAppFileForChat = null;
+    msgProvider.setSendingMessage(false);
   }
 
   sendInitialAppMessage(App? app) async {

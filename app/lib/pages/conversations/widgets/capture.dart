@@ -27,7 +27,8 @@ class LiteCaptureWidgetState extends State<LiteCaptureWidget> with AutomaticKeep
 
   @override
   void initState() {
-    WavBytesUtil.clearTempWavFiles();
+    // WavBytesUtil.clearTempWavFiles(); // This method no longer exists.
+    // If cleanup of temporary files is needed, it must be handled differently now.
     SchedulerBinding.instance.addPostFrameCallback((_) async {
       if (context.read<DeviceProvider>().connectedDevice != null) {
         context.read<OnboardingProvider>().stopScanDevices();

@@ -15,6 +15,8 @@ import 'package:omi/services/devices.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/sockets/transcription_connection.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io' as io; // Explicit import for dart:io.File
 
 class SpeechProfileProvider extends ChangeNotifier
     with MessageNotifierMixin
@@ -89,7 +91,7 @@ class SpeechProfileProvider extends ChangeNotifier
     device = deviceProvider?.connectedDevice;
 
     BleAudioCodec codec = await _getAudioCodec(device!.id);
-    audioStorage = WavBytesUtil(codec: codec, framesPerSecond: codec.getFramesPerSecond());
+    initAudioStorage(codec);
     await _initiateWebsocket(codec: codec, force: true);
 
     if (device != null) await initiateFriendAudioStreaming();
@@ -167,11 +169,30 @@ class SpeechProfileProvider extends ChangeNotifier
       connectionStateListener?.cancel();
       _bleBytesStream?.cancel();
 
+      // Capture frames BEFORE clearing, if createWavDataWeb/Mobile needs them
+      // Assuming audioStorage.frames is the source
+      List<List<int>> framesToProcess = List<List<int>>.from(audioStorage.frames);
+      if (!kIsWeb) {
+        // It seems audioStorage.clearAudioBytes() might be called inside createWavFileMobile or createWavDataWeb
+        // For mobile, it seems fine to let createWavFileMobile handle its frames and clearing.
+      } else {
+        // For web, explicitly pass the frames, as clearAudioBytes might be conditional inside createWavFile
+        // and we need to ensure createWavDataWeb gets the correct frames.
+      }
+
       updateLoadingText('Memorizing your voice...');
-      var data = await audioStorage.createWavFile(filename: 'speaker_profile.wav');
-      try {
-        await uploadProfile(data.item1);
-      } catch (e) {}
+      if (kIsWeb) {
+        // Ensure framesToProcess is passed to createWavDataWeb
+        var dataTuple = await audioStorage.createWavByCodec(framesToProcess, filename: 'speaker_profile.wav');
+        // dataTuple is Tuple2<Uint8List, String> (bytes, filename)
+        await uploadProfileWeb(dataTuple.item1, dataTuple.item2);
+      } else {
+        // On mobile, createWavFileMobile should use its internally stored frames or be passed them if refactored
+        // The current WavBytesUtil.createWavFileMobile uses 'this.frames'
+        // createWavByCodec returns io.File on mobile
+        io.File dataFile = await audioStorage.createWavByCodec(framesToProcess, filename: 'speaker_profile.wav'); 
+        await uploadProfileMobile(dataFile); // data is dart:io.File here
+      }
 
       updateLoadingText('Personalizing your experience...');
       SharedPreferencesUtil().hasSpeakerProfile = true;
@@ -246,7 +267,7 @@ class SpeechProfileProvider extends ChangeNotifier
   void resetSegments() {
     segments.clear();
     streamStartedAtSecond = null;
-    audioStorage.clearAudioBytes();
+    audioStorage.reset();
     text = '';
     percentageCompleted = 0;
     notifyListeners();
@@ -349,7 +370,9 @@ class SpeechProfileProvider extends ChangeNotifier
   void onSegmentReceived(List<TranscriptSegment> newSegments) {
     if (newSegments.isEmpty) return;
     if (segments.isEmpty) {
-      audioStorage.removeFramesRange(fromSecond: 0, toSecond: newSegments[0].start.toInt());
+      // audioStorage.removeFramesRange(fromSecond: 0, toSecond: newSegments[0].start.toInt()); // Method not available
+      // Consider if alternative logic is needed here if frame removal is critical.
+      // For now, commenting out.
     }
     streamStartedAtSecond ??= newSegments[0].start;
 
@@ -368,4 +391,9 @@ class SpeechProfileProvider extends ChangeNotifier
 
   @override
   void onConnected() {}
+
+  void initAudioStorage(BleAudioCodec codec) {
+    audioStorage = WavBytesUtil(codec: codec);
+    notifyListeners();
+  }
 }

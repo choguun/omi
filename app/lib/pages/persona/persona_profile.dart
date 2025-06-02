@@ -1,5 +1,9 @@
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'dart:io' as io; // Alias for mobile
+import 'package:omi/utils/stubs/dart_io_web.dart' if (dart.library.io) 'dart:io'; // Conditional import for stub/actual File
+import 'dart:typed_data';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:omi/backend/auth.dart';
 import 'package:omi/backend/preferences.dart';
@@ -144,10 +148,24 @@ class _PersonaProfilePageState extends State<PersonaProfilePage> {
                                         child: ClipRRect(
                                           borderRadius: BorderRadius.circular(50),
                                           child: provider.selectedImage != null
-                                              ? Image.file(
-                                                  provider.selectedImage!,
-                                                  fit: BoxFit.cover,
+                                              ? kIsWeb 
+                                                ? FutureBuilder<Uint8List>(
+                                                  future: provider.selectedImage!.readAsBytes(),
+                                                  builder: (context, snapshot) {
+                                                    if (snapshot.connectionState == ConnectionState.done && snapshot.hasData) {
+                                                      return Image.memory(snapshot.data!, fit: BoxFit.cover);
+                                                    } else if (snapshot.hasError) {
+                                                      return const Icon(Icons.error, color: Colors.white); // Or some error placeholder
+                                                    }                                                    
+                                                    return const CircularProgressIndicator(); // Loading indicator
+                                                  }
                                                 )
+                                                : Image.file(
+                                                    // On mobile, provider.selectedImage.path should be valid if it's a MobileAppFile from a path
+                                                    // Ensure selectedImage is a MobileAppFile and path is not null.
+                                                    io.File(provider.selectedImage!.path!),
+                                                    fit: BoxFit.cover,
+                                                  )
                                               : persona.image.isEmpty
                                                   ? Image.asset(Assets.images.logoTransparentV2.path)
                                                   : CachedNetworkImage(

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:version/version.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class DeviceUtils {
   static Future<(String, bool, String)> shouldUpdateFirmware({
@@ -30,7 +31,7 @@ class DeviceUtils {
         if (Version.parse(packageInfo.version) <= Version.parse(latestFirmwareDetails['min_app_version']) &&
             int.parse(packageInfo.buildNumber) < int.parse(latestFirmwareDetails['min_app_version_code'])) {
           return (
-            'The latest version of firmware is not compatible with this version of App (${packageInfo.version}+${packageInfo.buildNumber}). Please update the app from ${Platform.isAndroid ? 'Play Store' : 'App Store'}',
+            'The latest version of firmware is not compatible with this version of App (${packageInfo.version}+${packageInfo.buildNumber}). Please update the app from ${!kIsWeb && Platform.isAndroid ? 'Play Store' : 'App Store'}',
             false,
             latestVersionStr
           );

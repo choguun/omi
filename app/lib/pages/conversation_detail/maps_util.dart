@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:omi/env/env.dart';
 import 'package:map_launcher/map_launcher.dart';
 
@@ -15,7 +16,7 @@ class MapsUtil {
   }
 
   static void launchMap(double lat, double lng) async {
-    if (Platform.isIOS) {
+    if (!kIsWeb && Platform.isIOS) {
       await MapLauncher.showMarker(
         mapType: MapType.apple,
         coords: Coords(lat, lng),

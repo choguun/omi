@@ -68,7 +68,25 @@ class _WalListItemState extends State<WalListItem> {
               ),
               onDismissed: (direction) {
                 var wal = widget.wal;
-                ServiceManager.instance().wal.getSyncs().deleteWal(wal);
+                Navigator.pop(context);
+                IWalSync? syncService;
+                switch (wal.storage) {
+                  case WalStorage.mem:
+                    syncService = ServiceManager.instance().wal.getSyncs().mem;
+                    break;
+                  case WalStorage.disk:
+                    syncService = ServiceManager.instance().wal.getSyncs().disk;
+                    break;
+                  case WalStorage.sdcard:
+                    syncService = ServiceManager.instance().wal.getSyncs().sdcard;
+                    break;
+                }
+                if (syncService != null) {
+                  syncService.deleteWal(wal);
+                } else {
+                  // Fallback or error if service not found, though this shouldn't happen with known WalStorage types
+                  debugPrint("Could not find sync service for WAL: ${wal.id}");
+                }
               },
               child: Padding(
                 padding: const EdgeInsetsDirectional.all(0),
@@ -280,7 +298,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                       onPressed: () async {
                         if (context.read<ConnectivityProvider>().isConnected) {
                           // _toggleAnimation();
-                          await conversationProvider.syncWals();
+                          await conversationProvider.syncAllWals();
                           // _toggleAnimation();
                         } else {
                           ScaffoldMessenger.of(context).showSnackBar(
