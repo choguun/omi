@@ -14,7 +14,8 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/dev_env.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/env/prod_env.dart';
-import 'package:omi/firebase_options.dart';
+import 'package:omi/firebase_options_dev.dart' as dev;
+import 'package:omi/firebase_options_prod.dart' as prod;
 import 'package:omi/flavors.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/apps/providers/add_app_provider.dart';
@@ -60,7 +61,11 @@ Future<bool> _init() async {
   ServiceManager.init();
 
   // Firebase
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  if (F.env == Environment.prod) {
+    await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform, name: 'prod');
+  } else {
+    await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform, name: 'dev');
+  }
 
   await PlatformManager.initializeServices();
   await NotificationService.instance.initialize();
