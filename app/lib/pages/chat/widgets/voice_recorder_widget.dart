@@ -14,7 +14,6 @@ import 'package:shimmer/shimmer.dart';
 import 'package:path_provider/path_provider.dart' if (dart.library.html) 'package:omi/pages/home/path_provider_unsupported.dart'; // Conditional import for path_provider
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:omi/utils/app_file.dart'; // Import AppFile
-import 'dart:html' as html; // Added for debugging download
 
 enum RecordingState {
   notRecording,
