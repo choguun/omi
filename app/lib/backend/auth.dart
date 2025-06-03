@@ -114,7 +114,6 @@ Future<UserCredential?> signInWithGoogle() async {
     // Trigger the authentication flow
     final GoogleSignInAccount? googleUser = await GoogleSignIn(
       scopes: ['profile', 'email'],
-      clientId: kIsWeb ? "1031333818730-l9meebge7tpc0qmquvq6t5qpoe09o1ra.apps.googleusercontent.com" : null,
     ).signIn();
     debugPrint('Google User: $googleUser');
 
