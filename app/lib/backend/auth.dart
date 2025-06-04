@@ -114,6 +114,7 @@ Future<UserCredential?> signInWithGoogle() async {
     // Trigger the authentication flow
     final GoogleSignInAccount? googleUser = await GoogleSignIn(
       scopes: ['profile', 'email'],
+      clientId: kIsWeb ? const String.fromEnvironment('GOOGLE_WEB_CLIENT_ID') : null,
     ).signIn();
     debugPrint('Google User: $googleUser');
 
