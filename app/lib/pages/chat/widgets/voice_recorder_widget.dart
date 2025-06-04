@@ -161,7 +161,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
     // Subtract 30 seconds to ensure the timestamp is not slightly in the future.
     final int currentMilliseconds = DateTime.now().millisecondsSinceEpoch;
     final String timestamp = (currentMilliseconds ~/ 1000).toString();
-    final String fileName = "voice_recording_${timestamp}_fs${opusFrameSizeInSamples}.bin";
+    final String fileName = "voice_recording_${timestamp}_fs${opusFrameSizeInSamples}_sr${actualSampleRate}.bin";
     // --- END TEMPORARY HARDCODED FILENAME ---
 
     _recordedAudioAppFile = await AppFile.fromBytes(

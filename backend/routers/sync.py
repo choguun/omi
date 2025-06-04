@@ -65,8 +65,27 @@ def decode_opus_file_to_wav(opus_file_path, wav_file_path, sample_rate=16000, ch
 
 
 def get_timestamp_from_path(path: str):
-    timestamp = int(path.split('/')[-1].split('_')[-1].split('.')[0])
-    if timestamp > 1e10:
+    # For a filename like "voice_recording_1749018506_fs320.bin"
+    # path.split('/')[-1] is "voice_recording_1749018506_fs320.bin"
+    # .split('_')[-2] will correctly get the timestamp part "1749018506"
+    # For new filenames like "voice_recording_12345_fs320_sr16000.bin"
+    # .split('_')[2] will get the timestamp part "12345"
+    filename_parts = path.split('/')[-1].split('_')
+    if len(filename_parts) >= 3 and filename_parts[0] == 'voice' and filename_parts[1] == 'recording':
+        timestamp_str_part = filename_parts[2]
+    else:
+        # Fallback or raise error for unknown format, for now, let's try the old logic
+        # or handle more robustly depending on requirements.
+        # This could indicate an unexpected filename format.
+        # For safety, trying the previous logic if the new one fails to find parts.
+        # Consider raising an error if strict format adherence is required.
+        if len(filename_parts) > 2:
+             timestamp_str_part = filename_parts[-2] # old logic
+        else:
+            raise ValueError("Filename does not match expected formats for timestamp extraction")
+
+    timestamp = int(timestamp_str_part)
+    if timestamp > 1e10: # Checks if it's milliseconds
         return int(timestamp / 1000)
     return timestamp
 
@@ -104,15 +123,27 @@ def decode_files_to_wav(files_path: List[str]):
         wav_path = path.replace('.bin', '.wav')
         filename = os.path.basename(path)
         frame_size = 160  # Default frame size
-        match = re.search(r'_fs(\d+)', filename)
-        if match:
+        sample_rate = 16000  # Default sample rate
+
+        # Extract frame size
+        fs_match = re.search(r'_fs(\d+)', filename)
+        if fs_match:
             try:
-                frame_size = int(match.group(1))
+                frame_size = int(fs_match.group(1))
                 print(f"Found frame size {frame_size} in filename: {filename}")
             except ValueError:
                 print(f"Invalid frame size format in filename: {filename}, using default {frame_size}")
 
-        decode_opus_file_to_wav(path, wav_path, frame_size=frame_size)
+        # Extract sample rate
+        sr_match = re.search(r'_sr(\d+)', filename)
+        if sr_match:
+            try:
+                sample_rate = int(sr_match.group(1))
+                print(f"Found sample rate {sample_rate} in filename: {filename}")
+            except ValueError:
+                print(f"Invalid sample rate format in filename: {filename}, using default {sample_rate}")
+
+        decode_opus_file_to_wav(path, wav_path, sample_rate=sample_rate, frame_size=frame_size)
         try:
             aseg = AudioSegment.from_wav(wav_path)
         except Exception as e:

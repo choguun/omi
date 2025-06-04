@@ -351,14 +351,7 @@ class MicRecorderService implements IMicRecorderService {
     await _recorder.openRecorder(isBGService: _isInBG);
 
     if (kIsWeb) {
-      var webSampleRate = await _recorder.getSampleRate();
-      debugPrint('Actual recording sample rate on web (raw value from recorder): $webSampleRate');
-      _actualSampleRate = 16000; // Try 16000Hz for web, a standard Opus rate
-      if (webSampleRate == null || webSampleRate == 0) {
-        debugPrint('Warning: getSampleRate() returned $webSampleRate. Using determined $_actualSampleRate Hz.');
-      } else if (webSampleRate != _actualSampleRate) {
-        debugPrint('Note: Browser reported sample rate $webSampleRate, but we are targeting $_actualSampleRate Hz for Opus encoding.');
-      }
+      _actualSampleRate = 48000; // 48kHz for web
     } else {
       _actualSampleRate = 16000;
     }
