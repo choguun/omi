@@ -61,6 +61,7 @@ Future<bool> _init() async {
   ServiceManager.init();
 
   // Firebase
+  await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform);
   if (F.env == Environment.prod) {
     await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform, name: 'prod');
   } else {
